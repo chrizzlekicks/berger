@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# amux — tmux agent status helper for Claude Code
+set -euo pipefail
+
+AMUX_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/amux"
+VALID_STATES="working approval done error unknown"
+
+# State -> symbol mapping
+state_symbol() {
+  case "$1" in
+    working)  echo "…" ;;
+    approval) echo "!" ;;
+    done)     echo "✓" ;;
+    error)    echo "✗" ;;
+    unknown)  echo "?" ;;
+    *)        echo "?" ;;
+  esac
+}
+
+# Strip all known suffixes from a window name
+strip_suffix() {
+  local name="$1"
+  # Strip trailing known suffix characters (one at a time, loop)
+  while [[ "$name" =~ […!✓✗·?]$ ]]; do
+    name="${name%?}"
+  done
+  echo "$name"
+}
+
+# Resolve agent name from tmux pane, falling back to basename of $PWD
+cmd_agent_name() {
+  local name=""
+  if [[ -n "${TMUX_PANE:-}" ]]; then
+    name="$(tmux display-message -t "$TMUX_PANE" -p '#W' 2>/dev/null || true)"
+  elif [[ -n "${TMUX:-}" ]]; then
+    name="$(tmux display-message -p '#W' 2>/dev/null || true)"
+  fi
+  name="$(strip_suffix "${name:-$(basename "$PWD")}")"
+  echo "$name"
+}
+
+# State file path for a given session + agent
+state_file() {
+  local session="$1" agent="$2"
+  echo "${AMUX_CACHE}/${session}/${agent}.state"
+}
+
+cmd_mark() {
+  local agent="" state="" harness="" session="" window=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent)   agent="$2";   shift 2 ;;
+      --state)   state="$2";   shift 2 ;;
+      --harness) harness="$2"; shift 2 ;;
+      --session) session="$2"; shift 2 ;;
+      --window)  window="$2";  shift 2 ;;
+      *) echo "amux mark: unknown flag: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  [[ -z "$agent" ]] && { echo "amux mark: --agent required" >&2; exit 1; }
+  [[ -z "$state" ]] && { echo "amux mark: --state required" >&2; exit 1; }
+
+  # Strip any status suffix that may have leaked into the agent name (e.g. when
+  # AMUX_AGENT is inferred from a window that was already renamed by the watcher)
+  agent="$(strip_suffix "$agent")"
+
+  # Validate state
+  local valid=0
+  for s in $VALID_STATES; do [[ "$s" == "$state" ]] && valid=1 && break; done
+  [[ $valid -eq 0 ]] && { echo "amux mark: invalid state '$state'. Valid: $VALID_STATES" >&2; exit 1; }
+
+  # Infer session/window from tmux env if available
+  if [[ -z "$session" ]] && [[ -n "${TMUX:-}" ]]; then
+    session="$(tmux display-message -p '#S' 2>/dev/null || true)"
+  fi
+  if [[ -z "$session" ]]; then
+    session="${AMUX_SESSION:-default}"
+  fi
+
+  if [[ -z "$window" ]]; then
+    window="$agent"
+  fi
+
+  local file
+  file="$(state_file "$session" "$agent")"
+  mkdir -p "$(dirname "$file")"
+
+  # Write atomically via temp file
+  local tmp
+  tmp="$(mktemp "${file}.XXXXXX")"
+  printf 'agent=%s\nstate=%s\nupdated_at=%s\nharness=%s\nsession=%s\nwindow=%s\n' \
+    "$agent" "$state" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "${harness:-}" "$session" "$window" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+cmd_watch() {
+  local session=""
+  local interval=2
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session) session="$2"; shift 2 ;;
+      --interval) interval="$2"; shift 2 ;;
+      *) echo "amux watch: unknown flag: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  # Infer session from tmux if not given
+  if [[ -z "$session" ]]; then
+    if [[ -n "${TMUX:-}" ]]; then
+      session="$(tmux display-message -p '#S' 2>/dev/null || true)"
+    fi
+    session="${session:-default}"
+  fi
+
+  local lock_file="${AMUX_CACHE}/${session}/watch.pid"
+  mkdir -p "${AMUX_CACHE}/${session}"
+
+  # Prevent duplicate watchers for the same session
+  if [[ -f "$lock_file" ]]; then
+    local existing_pid
+    existing_pid="$(cat "$lock_file" 2>/dev/null || true)"
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "amux watch: watcher already running for session '$session' (pid $existing_pid)" >&2
+      exit 0
+    fi
+  fi
+
+  # Write our PID
+  echo "$$" > "$lock_file"
+
+  # Cleanup on exit
+  trap 'rm -f "$lock_file"' EXIT INT TERM
+
+  echo "amux watch: watching session '$session' (interval ${interval}s, pid $$)" >&2
+
+  while true; do
+    # Get all tmux windows for this session (format: index:name)
+    local windows
+    if ! windows="$(tmux list-windows -t "$session" -F '#{window_index}:#{window_name}' 2>/dev/null)"; then
+      echo "amux watch: tmux session '$session' not found, retrying..." >&2
+      sleep "$interval"
+      continue
+    fi
+
+    # Read all state files for this session
+    local state_dir="${AMUX_CACHE}/${session}"
+    if [[ -d "$state_dir" ]]; then
+      while IFS= read -r -d '' state_f; do
+        # Parse state file
+        local agent="" state=""
+        while IFS='=' read -r key val; do
+          case "$key" in
+            agent) agent="$val" ;;
+            state) state="$val" ;;
+          esac
+        done < "$state_f"
+
+        [[ -z "$agent" || -z "$state" ]] && continue
+
+        # Only show suffix for actionable states; clear otherwise
+        local symbol=""
+        case "$state" in
+          approval) symbol="!" ;;
+          done)     symbol="✓" ;;
+          error)    symbol="✗" ;;
+        esac
+
+        # Find matching tmux window by base name
+        while IFS=':' read -r win_idx win_name; do
+          local base
+          base="$(strip_suffix "$win_name")"
+          if [[ "$base" == "$agent" ]]; then
+            local new_name="${base}${symbol}"
+            # Only rename if the name would actually change
+            if [[ "$win_name" != "$new_name" ]]; then
+              tmux rename-window -t "${session}:${win_idx}" "$new_name" 2>/dev/null || true
+            fi
+          fi
+        done <<< "$windows"
+
+      done < <(find "$state_dir" -maxdepth 1 -name '*.state' -print0 2>/dev/null)
+    fi
+
+    sleep "$interval"
+  done
+}
+
+cmd_status() {
+  local session=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session) session="$2"; shift 2 ;;
+      *) echo "amux status: unknown flag: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [[ -z "$session" ]]; then
+    if [[ -n "${TMUX:-}" ]]; then
+      session="$(tmux display-message -p '#S' 2>/dev/null || true)"
+    fi
+    session="${session:-default}"
+  fi
+
+  local state_dir="${AMUX_CACHE}/${session}"
+  if [[ ! -d "$state_dir" ]]; then
+    echo "No state for session '$session'"
+    return 0
+  fi
+
+  printf '%-15s %-10s %s\n' "AGENT" "STATE" "UPDATED"
+  while IFS= read -r -d '' state_f; do
+    local agent="" state="" updated_at=""
+    while IFS='=' read -r key val; do
+      case "$key" in
+        agent)      agent="$val" ;;
+        state)      state="$val" ;;
+        updated_at) updated_at="$val" ;;
+      esac
+    done < "$state_f"
+    local symbol
+    symbol="$(state_symbol "$state")"
+    printf '%-15s %-10s %s\n' "$agent" "${state}${symbol}" "$updated_at"
+  done < <(find "$state_dir" -maxdepth 1 -name '*.state' -print0 2>/dev/null | sort -z)
+}
+
+usage() {
+  cat <<'EOF'
+amux — tmux agent status helper for Claude Code
+
+USAGE
+  amux mark --agent <name> --state <state> [options]
+  amux watch [--session <session>] [--interval <seconds>]
+  amux status [--session <session>]
+  amux agent-name
+
+MARK OPTIONS
+  --agent <name>      Agent name (e.g. impl, plan, review)
+  --state <state>     One of: working approval done error idle unknown
+  --harness <name>    Harness name (e.g. claude)
+  --session <name>    tmux session (inferred from $TMUX if omitted)
+  --window <name>     tmux window (defaults to agent name)
+
+STATES & SYMBOLS
+  working   (no suffix)
+  approval  !
+  done      ✓
+  error     ✗
+  unknown   ?
+EOF
+}
+
+case "${1:-}" in
+  mark)       shift; cmd_mark "$@" ;;
+  watch)      shift; cmd_watch "$@" ;;
+  status)     shift; cmd_status "$@" ;;
+  agent-name) cmd_agent_name ;;
+  -h|--help|help) usage ;;
+  "") usage; exit 1 ;;
+  *) echo "amux: unknown command '$1'. Try 'amux --help'." >&2; exit 1 ;;
+esac
