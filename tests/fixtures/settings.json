@@ -1,0 +1,95 @@
+{
+  "model": "opus",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux watch --session \"$(tmux display-message -p '#S')\" >/tmp/amux-$(tmux display-message -p '#S').log 2>&1 & amux mark --agent \"$(amux agent-name)\" --state working --harness claude"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux mark --agent \"$(amux agent-name)\" --state working --harness claude"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux mark --agent \"$(amux agent-name)\" --state working --harness claude"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook claude"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux mark --agent \"$(amux agent-name)\" --state approval --harness claude"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux mark --agent \"$(amux agent-name)\" --state error --harness claude"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux mark --agent \"$(amux agent-name)\" --state done --harness claude"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux mark --agent \"$(amux agent-name)\" --state error --harness claude"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "amux mark --agent \"$(amux agent-name)\" --state working --harness claude & rm -f \"${XDG_CACHE_HOME:-$HOME/.cache}/amux/$(tmux display-message -p '#S')/$(amux agent-name).state\""
+          }
+        ]
+      }
+    ]
+  }
+}
