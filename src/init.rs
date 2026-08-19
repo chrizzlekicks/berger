@@ -18,19 +18,26 @@ const HOOK_EVENTS: &[&str] = &[
 /// dropped, and exactly one entry with `command == bergr_cmd` is ensured to exist.
 /// All other entries (e.g. `{matcher: "Bash", command: "rtk hook claude"}`) are left
 /// untouched, in whatever position they were found.
-pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) {
-    let hooks = settings
+///
+/// `settings` comes from a hand-editable file, not a trusted internal type, so a
+/// shape mismatch (e.g. `"hooks": []` instead of an object) is reported as an error
+/// rather than a panic.
+pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> {
+    let root = settings
         .as_object_mut()
-        .expect("settings.json root must be an object")
+        .ok_or("settings.json root must be an object")?;
+    let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    let hooks = hooks.as_object_mut().expect("hooks must be an object");
+    let hooks = hooks.as_object_mut().ok_or("\"hooks\" must be an object")?;
 
     for event in HOOK_EVENTS {
         let entries = hooks
             .entry(event.to_string())
             .or_insert_with(|| Value::Array(Vec::new()));
-        let entries = entries.as_array_mut().expect("hook event must be an array");
+        let entries = entries
+            .as_array_mut()
+            .ok_or_else(|| format!("\"hooks.{event}\" must be an array"))?;
 
         entries.retain(|entry| !entry_command_contains(entry, "amux"));
 
@@ -43,6 +50,7 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) {
             }));
         }
     }
+    Ok(())
 }
 
 fn entry_command_contains(entry: &Value, needle: &str) -> bool {
@@ -85,6 +93,16 @@ fn home() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").expect("HOME must be set"))
 }
 
+/// Writes via tmpfile + rename so a crash mid-write can never leave `path`
+/// truncated or half-written — these files (Claude's hook config, bergr's tmux
+/// config) are read on every session start, unlike state files that get
+/// rewritten constantly and can tolerate a rare loss.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
+}
+
 /// Runs the `init` command against the real environment: refuses to run from a
 /// `target/` build directory (the hooks would then reference a path that stops
 /// existing on the next `cargo clean`), merges hooks into `~/.claude/settings.json`,
@@ -103,6 +121,12 @@ pub fn run() {
     let bergr_bin = exe.to_string_lossy().into_owned();
 
     let settings_path = home().join(".claude").join("settings.json");
+    if let Some(dir) = settings_path.parent() {
+        if let Err(e) = fs::create_dir_all(dir) {
+            eprintln!("bergr init: could not create {}: {e}", dir.display());
+            std::process::exit(1);
+        }
+    }
     let mut settings: Value = match fs::read_to_string(&settings_path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
             eprintln!("bergr init: {} is not valid JSON: {e}", settings_path.display());
@@ -119,9 +143,12 @@ pub fn run() {
         }
     }
 
-    merge_hooks(&mut settings, &format!("{bergr_bin} event"));
+    if let Err(e) = merge_hooks(&mut settings, &format!("{bergr_bin} event")) {
+        eprintln!("bergr init: {} has an unexpected shape: {e}", settings_path.display());
+        std::process::exit(1);
+    }
     let rendered = serde_json::to_string_pretty(&settings).unwrap();
-    if let Err(e) = fs::write(&settings_path, rendered) {
+    if let Err(e) = write_atomic(&settings_path, &rendered) {
         eprintln!("bergr init: could not write {}: {e}", settings_path.display());
         std::process::exit(1);
     }
@@ -132,7 +159,7 @@ pub fn run() {
         std::process::exit(1);
     }
     let tmux_conf_path = bergr_conf_dir.join("tmux.conf");
-    if let Err(e) = fs::write(&tmux_conf_path, tmux_conf_contents(&bergr_bin)) {
+    if let Err(e) = write_atomic(&tmux_conf_path, &tmux_conf_contents(&bergr_bin)) {
         eprintln!("bergr init: could not write {}: {e}", tmux_conf_path.display());
         std::process::exit(1);
     }
@@ -185,7 +212,7 @@ mod tests {
     #[test]
     fn replaces_amux_entries_and_keeps_unrelated_hooks() {
         let mut settings = load_fixture();
-        merge_hooks(&mut settings, "/home/schimetschka/.local/bin/bergr event");
+        merge_hooks(&mut settings, "/home/schimetschka/.local/bin/bergr event").unwrap();
 
         let pre_tool_use = settings["hooks"]["PreToolUse"].as_array().unwrap();
         assert!(
@@ -206,7 +233,7 @@ mod tests {
     fn every_event_gets_exactly_one_bergr_entry() {
         let mut settings = load_fixture();
         let cmd = "/home/schimetschka/.local/bin/bergr event";
-        merge_hooks(&mut settings, cmd);
+        merge_hooks(&mut settings, cmd).unwrap();
 
         for event in HOOK_EVENTS {
             let entries = settings["hooks"][event].as_array().unwrap();
@@ -222,9 +249,9 @@ mod tests {
     fn rerunning_merge_is_a_no_op() {
         let mut settings = load_fixture();
         let cmd = "/home/schimetschka/.local/bin/bergr event";
-        merge_hooks(&mut settings, cmd);
+        merge_hooks(&mut settings, cmd).unwrap();
         let once = settings.clone();
-        merge_hooks(&mut settings, cmd);
+        merge_hooks(&mut settings, cmd).unwrap();
         assert_eq!(settings, once, "a second merge must be idempotent");
     }
 
@@ -232,14 +259,14 @@ mod tests {
     fn unrelated_top_level_keys_survive() {
         let mut settings = load_fixture();
         let before_model = settings["model"].clone();
-        merge_hooks(&mut settings, "/x/bergr event");
+        merge_hooks(&mut settings, "/x/bergr event").unwrap();
         assert_eq!(settings["model"], before_model);
     }
 
     #[test]
     fn event_with_no_prior_hooks_still_gets_bergr_entry() {
         let mut settings = serde_json::json!({});
-        merge_hooks(&mut settings, "/x/bergr event");
+        merge_hooks(&mut settings, "/x/bergr event").unwrap();
         for event in HOOK_EVENTS {
             let entries = settings["hooks"][event].as_array().unwrap();
             assert_eq!(entries.len(), 1);
@@ -267,5 +294,19 @@ mod tests {
         let conf = tmux_conf_contents("/home/schimetschka/.local/bin/bergr");
         assert!(conf.contains("/home/schimetschka/.local/bin/bergr sync --session"));
         assert!(conf.contains("allow-rename off"));
+    }
+
+    #[test]
+    fn merge_hooks_reports_error_instead_of_panicking_on_non_object_hooks() {
+        let mut settings = serde_json::json!({ "hooks": [] });
+        let result = merge_hooks(&mut settings, "/x/bergr event");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_hooks_reports_error_when_root_is_not_an_object() {
+        let mut settings = serde_json::json!([]);
+        let result = merge_hooks(&mut settings, "/x/bergr event");
+        assert!(result.is_err());
     }
 }
