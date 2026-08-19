@@ -105,16 +105,20 @@ claude
 
 ## Architecture
 
-```
-Claude Code hook (any of 8 events)
-  -> bergr event            [short-lived: stdin JSON in, exit]
-        - parse hook_event_name -> state
-        - write state file (atomic: tmpfile + rename, same dir)
-        - tmux rename-window "<agent><symbol>"
+```mermaid
+flowchart LR
+    hook["Claude Code hook\n(any of 8 events)"] -->|stdin JSON| event["bergr event"]
+    event -->|"atomic write\n(tmpfile + rename)"| state[("state file\n<session>/<agent>.state")]
+    event -->|rename-window| tmux(("tmux window\n<agent><symbol>"))
 
-bergr sync --session <name>   [one-shot reconciler, run on demand]
-  -> read every state file for the session -> rename every matching window
+    sync["bergr sync --session <name>\n(run on demand)"] -->|reads all| state
+    sync -->|rename-window| tmux
 ```
+
+`bergr event` is short-lived: read stdin, write state, exit — nothing stays running
+between hooks. `bergr sync` reads every state file for a session and reconciles any
+window that has drifted; run it manually, or bind it to a tmux key (`init` does this
+by default).
 
 State files are plain key=value text — no JSON, no jq required.
 
