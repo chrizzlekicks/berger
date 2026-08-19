@@ -84,6 +84,28 @@ There is no `watch`/daemon: state only changes when a hook fires, so `event`
 renames the window in the same invocation. `sync` is the on-demand repair path
 for anything that falls out of sync in between.
 
+## Testing
+
+Unit tests live alongside the Rust source (`cargo test`). The smoke suite in
+`tests/smoke_test.py` drives a real, throwaway tmux server end-to-end —
+build the binary first, then run it:
+
+```bash
+cargo build
+python3 tests/smoke_test.py          # run everything
+python3 tests/smoke_test.py -v       # verbose
+
+# run a single test
+python3 tests/smoke_test.py SmokeLifecycle.test_permission_request_adds_bang
+
+# opt-in: also exercise a real `claude` session through the installed hooks
+BERGR_TEST_REAL_CLAUDE=1 python3 tests/smoke_test.py
+```
+
+Each test spins up an isolated `tmux -L bergr-test-<pid>-<n>` server with its
+own `HOME`/`XDG_CACHE_HOME` and a `tmux` PATH shim — your real tmux server and
+config are never touched. See `tests/harness/sandbox.py` for details.
+
 ## Per-window agent name
 
 Agent name is resolved from the current tmux window name (suffix stripped), or
