@@ -1,0 +1,112 @@
+use crate::hook::HookPayload;
+use crate::name::strip_suffix;
+use crate::state::{self, StateRecord};
+use crate::tmux;
+use std::io::Read;
+
+/// Resolves the agent name for this invocation: `$BERGR_AGENT` overrides (mirrors the
+/// amux prototype's `AMUX_AGENT`, letting the tracked agent differ from the window
+/// name), then the current tmux window name (suffix stripped, since a window bergr
+/// already renamed must still match its own state file), then `basename($PWD)`.
+fn resolve_agent() -> String {
+    if let Ok(a) = std::env::var("BERGR_AGENT") {
+        if !a.is_empty() {
+            return strip_suffix(&a);
+        }
+    }
+    if let Some(window) = tmux::current_window_name() {
+        return strip_suffix(&window);
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default()
+}
+
+/// Runs the `event` command: reads a hook payload from stdin, updates state, and
+/// (when a tmux session is resolvable) renames the corresponding window.
+///
+/// Never fails outward. Every error path is logged to stderr and treated as a no-op —
+/// `bergr event` sits on Claude Code's hook path, where a non-zero exit can block a
+/// tool call or prompt, so a bergr bug must never be able to interfere with the
+/// user's session.
+pub fn run() {
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        eprintln!("bergr event: failed to read stdin");
+        return;
+    }
+
+    let payload: HookPayload = match serde_json::from_str(&input) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("bergr event: malformed hook payload: {e}");
+            return;
+        }
+    };
+
+    let Some(session) = tmux::current_session() else {
+        // Not inside tmux — a normal condition (plain terminal, IDE, CI), not an
+        // error. Nothing to update.
+        return;
+    };
+    let agent = resolve_agent();
+
+    let path = match state::state_path(&session, &agent) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("bergr event: cannot resolve state path: {e}");
+            return;
+        }
+    };
+
+    match state::state_for_event(&payload.hook_event_name) {
+        None => {
+            // SessionEnd (or an unrecognized event): clear state and strip any
+            // suffix from the window, rather than leaving it stale. This is the one
+            // path where, with no watcher to notice the file vanish, bergr itself
+            // must actively clear the suffix.
+            let _ = std::fs::remove_file(&path);
+            rename_matching_window(&session, &agent, &agent);
+        }
+        Some(new_state) => {
+            let record = StateRecord {
+                agent: agent.clone(),
+                state: new_state,
+                updated_at: now_utc(),
+                harness: "claude".to_string(),
+                session: session.clone(),
+                window: agent.clone(),
+            };
+            if let Err(e) = state::write_atomic(&path, &record.to_kv()) {
+                eprintln!("bergr event: failed writing {}: {e}", path.display());
+                return;
+            }
+            let new_name = format!("{agent}{}", new_state.symbol());
+            rename_matching_window(&session, &agent, &new_name);
+        }
+    }
+}
+
+fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
+    let Some(windows) = tmux::list_windows(session) else {
+        return;
+    };
+    let Some(window) = windows.iter().find(|w| strip_suffix(&w.name) == agent) else {
+        return;
+    };
+    if window.name != new_name {
+        tmux::rename_window(session, &window.index, new_name);
+    }
+}
+
+fn now_utc() -> String {
+    // No chrono dependency: shell out, matching the prototype's own `date -u`.
+    std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
