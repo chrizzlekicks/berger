@@ -3,7 +3,7 @@
 //! Suffix characters are multibyte UTF-8, so stripping operates over `char`s, never
 //! bytes.
 
-const SUFFIX_CHARS: &[char] = &['!', '\u{2713}', '\u{2717}', '?'];
+const SUFFIX_CHARS: &[char] = &['!', '\u{2713}', '\u{2717}'];
 
 pub fn strip_suffix(name: &str) -> String {
     let mut chars: Vec<char> = name.chars().collect();
@@ -37,12 +37,12 @@ mod tests {
     #[test]
     fn strips_repeated_suffix() {
         assert_eq!(strip_suffix("impl!!"), "impl");
-        assert_eq!(strip_suffix("impl!\u{2713}?"), "impl");
+        assert_eq!(strip_suffix("impl!\u{2713}"), "impl");
     }
 
     #[test]
     fn suffix_only_string_becomes_empty() {
-        assert_eq!(strip_suffix("!\u{2713}\u{2717}?"), "");
+        assert_eq!(strip_suffix("!\u{2713}\u{2717}"), "");
     }
 
     #[test]

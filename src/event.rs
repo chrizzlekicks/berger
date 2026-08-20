@@ -92,11 +92,10 @@ fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
     let Some(windows) = tmux::list_windows(session) else {
         return;
     };
-    let Some(window) = windows.iter().find(|w| strip_suffix(&w.name) == agent) else {
-        return;
-    };
-    if window.name != new_name {
-        tmux::rename_window(session, &window.index, new_name);
+    for window in windows.iter().filter(|w| strip_suffix(&w.name) == agent) {
+        if window.name != new_name {
+            tmux::rename_window(session, &window.index, new_name);
+        }
     }
 }
 

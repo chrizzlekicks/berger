@@ -93,6 +93,16 @@ fn home() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").expect("HOME must be set"))
 }
 
+/// Writes via tmpfile + rename so a crash mid-write can never leave `path`
+/// truncated or half-written — these files (Claude's hook config, bergr's tmux
+/// config) are read on every session start, unlike state files that get
+/// rewritten constantly and can tolerate a rare loss.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)
+}
+
 /// Runs the `init` command against the real environment: refuses to run from a
 /// `target/` build directory (the hooks would then reference a path that stops
 /// existing on the next `cargo clean`), merges hooks into `~/.claude/settings.json`,
@@ -138,7 +148,7 @@ pub fn run() {
         std::process::exit(1);
     }
     let rendered = serde_json::to_string_pretty(&settings).unwrap();
-    if let Err(e) = fs::write(&settings_path, rendered) {
+    if let Err(e) = write_atomic(&settings_path, &rendered) {
         eprintln!("bergr init: could not write {}: {e}", settings_path.display());
         std::process::exit(1);
     }
@@ -149,7 +159,7 @@ pub fn run() {
         std::process::exit(1);
     }
     let tmux_conf_path = bergr_conf_dir.join("tmux.conf");
-    if let Err(e) = fs::write(&tmux_conf_path, tmux_conf_contents(&bergr_bin)) {
+    if let Err(e) = write_atomic(&tmux_conf_path, &tmux_conf_contents(&bergr_bin)) {
         eprintln!("bergr init: could not write {}: {e}", tmux_conf_path.display());
         std::process::exit(1);
     }
