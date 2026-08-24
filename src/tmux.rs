@@ -93,9 +93,18 @@ mod tests {
         assert_eq!(
             parse_window_list(text),
             vec![
-                Window { index: "0".to_string(), name: "main".to_string() },
-                Window { index: "1".to_string(), name: "impl!".to_string() },
-                Window { index: "2".to_string(), name: "plan".to_string() },
+                Window {
+                    index: "0".to_string(),
+                    name: "main".to_string()
+                },
+                Window {
+                    index: "1".to_string(),
+                    name: "impl!".to_string()
+                },
+                Window {
+                    index: "2".to_string(),
+                    name: "plan".to_string()
+                },
             ]
         );
     }
@@ -109,7 +118,13 @@ mod tests {
     fn list_windows_args_targets_the_given_session() {
         assert_eq!(
             list_windows_args("myproject"),
-            vec!["list-windows", "-t", "myproject", "-F", "#{window_index}:#{window_name}"]
+            vec![
+                "list-windows",
+                "-t",
+                "myproject",
+                "-F",
+                "#{window_index}:#{window_name}"
+            ]
         );
     }
 
