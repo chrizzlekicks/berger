@@ -9,10 +9,10 @@ use std::io::Read;
 /// name), then the current tmux window name (suffix stripped, since a window bergr
 /// already renamed must still match its own state file), then `basename($PWD)`.
 fn resolve_agent() -> String {
-    if let Ok(a) = std::env::var("BERGR_AGENT") {
-        if !a.is_empty() {
-            return strip_suffix(&a);
-        }
+    if let Ok(a) = std::env::var("BERGR_AGENT")
+        && !a.is_empty()
+    {
+        return strip_suffix(&a);
     }
     if let Some(window) = tmux::current_window_name() {
         return strip_suffix(&window);

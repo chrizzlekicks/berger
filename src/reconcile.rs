@@ -62,7 +62,10 @@ mod tests {
         let windows = vec![window("1", "impl")];
         assert_eq!(
             plan_renames(&records, &windows),
-            vec![Rename { index: "1".to_string(), new_name: "impl!".to_string() }]
+            vec![Rename {
+                index: "1".to_string(),
+                new_name: "impl!".to_string()
+            }]
         );
     }
 
@@ -72,7 +75,10 @@ mod tests {
         let windows = vec![window("1", "impl\u{2717}")]; // stale: was error, now done
         assert_eq!(
             plan_renames(&records, &windows),
-            vec![Rename { index: "1".to_string(), new_name: "impl\u{2713}".to_string() }]
+            vec![Rename {
+                index: "1".to_string(),
+                new_name: "impl\u{2713}".to_string()
+            }]
         );
     }
 
@@ -89,7 +95,10 @@ mod tests {
         let windows = vec![window("0", "main"), window("1", "impl")];
         assert_eq!(
             plan_renames(&records, &windows),
-            vec![Rename { index: "1".to_string(), new_name: "impl!".to_string() }]
+            vec![Rename {
+                index: "1".to_string(),
+                new_name: "impl!".to_string()
+            }]
         );
     }
 
@@ -99,7 +108,10 @@ mod tests {
         let windows = vec![window("1", "impl!")];
         assert_eq!(
             plan_renames(&records, &windows),
-            vec![Rename { index: "1".to_string(), new_name: "impl".to_string() }]
+            vec![Rename {
+                index: "1".to_string(),
+                new_name: "impl".to_string()
+            }]
         );
     }
 

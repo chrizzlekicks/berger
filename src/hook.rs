@@ -24,7 +24,8 @@ mod tests {
 
     #[test]
     fn ignores_unknown_fields() {
-        let json = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let json =
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
         let payload: HookPayload = serde_json::from_str(json).unwrap();
         assert_eq!(payload.hook_event_name, "PreToolUse");
     }

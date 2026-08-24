@@ -54,17 +54,15 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> 
 }
 
 fn entry_command_contains(entry: &Value, needle: &str) -> bool {
-    entry
-        .get("hooks")
-        .and_then(Value::as_array)
-        .map(|inner| {
-            inner.iter().any(|h| {
-                h.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|c| c.contains(needle))
-            })
+    let Some(inner) = entry.get("hooks").and_then(Value::as_array) else {
+        return false;
+    };
+    inner
+        .iter()
+        .any(|h| match h.get("command").and_then(Value::as_str) {
+            Some(c) => c.contains(needle),
+            None => false,
         })
-        .unwrap_or(false)
 }
 
 /// Detects a still-running amux watcher so `init` can warn about it — a live watcher
@@ -103,12 +101,14 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-/// Runs the `init` command against the real environment: refuses to run from a
-/// `target/` build directory (the hooks would then reference a path that stops
-/// existing on the next `cargo clean`), merges hooks into `~/.claude/settings.json`,
-/// writes `~/.config/bergr/tmux.conf`, creates the cache root, and warns about any
-/// still-running amux watcher.
-pub fn run() {
+fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+    result.unwrap_or_else(|e| {
+        eprintln!("bergr init: {context}: {e}");
+        std::process::exit(1);
+    })
+}
+
+fn resolve_bergr_bin() -> String {
     let exe = std::env::current_exe().expect("could not resolve current executable path");
     if exe.components().any(|c| c.as_os_str() == "target") {
         eprintln!(
@@ -118,67 +118,79 @@ pub fn run() {
         );
         std::process::exit(1);
     }
-    let bergr_bin = exe.to_string_lossy().into_owned();
+    exe.to_string_lossy().into_owned()
+}
 
+/// Merges bergr's hook into `~/.claude/settings.json`, backing up the previous
+/// contents once (on first run only, since re-running init should not clobber
+/// a backup that predates any bergr changes).
+fn update_claude_settings(bergr_bin: &str) -> std::path::PathBuf {
     let settings_path = home().join(".claude").join("settings.json");
     if let Some(dir) = settings_path.parent() {
-        if let Err(e) = fs::create_dir_all(dir) {
-            eprintln!("bergr init: could not create {}: {e}", dir.display());
-            std::process::exit(1);
-        }
+        exit_on_error(
+            fs::create_dir_all(dir),
+            &format!("could not create {}", dir.display()),
+        );
     }
+
     let mut settings: Value = match fs::read_to_string(&settings_path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            eprintln!("bergr init: {} is not valid JSON: {e}", settings_path.display());
-            std::process::exit(1);
-        }),
+        Ok(text) => exit_on_error(
+            serde_json::from_str(&text),
+            &format!("{} is not valid JSON", settings_path.display()),
+        ),
         Err(_) => Value::Object(serde_json::Map::new()),
     };
 
     let backup_path = settings_path.with_extension("json.bergr-bak");
     if settings_path.exists() && !backup_path.exists() {
-        if let Err(e) = fs::copy(&settings_path, &backup_path) {
-            eprintln!("bergr init: could not back up settings.json: {e}");
-            std::process::exit(1);
-        }
+        exit_on_error(
+            fs::copy(&settings_path, &backup_path),
+            "could not back up settings.json",
+        );
     }
 
-    if let Err(e) = merge_hooks(&mut settings, &format!("{bergr_bin} event")) {
-        eprintln!("bergr init: {} has an unexpected shape: {e}", settings_path.display());
-        std::process::exit(1);
-    }
+    exit_on_error(
+        merge_hooks(&mut settings, &format!("{bergr_bin} event")),
+        &format!("{} has an unexpected shape", settings_path.display()),
+    );
     let rendered = serde_json::to_string_pretty(&settings).unwrap();
-    if let Err(e) = write_atomic(&settings_path, &rendered) {
-        eprintln!("bergr init: could not write {}: {e}", settings_path.display());
-        std::process::exit(1);
-    }
+    exit_on_error(
+        write_atomic(&settings_path, &rendered),
+        &format!("could not write {}", settings_path.display()),
+    );
 
+    settings_path
+}
+
+fn write_bergr_tmux_conf(bergr_bin: &str) -> std::path::PathBuf {
     let bergr_conf_dir = home().join(".config").join("bergr");
-    if let Err(e) = fs::create_dir_all(&bergr_conf_dir) {
-        eprintln!("bergr init: could not create {}: {e}", bergr_conf_dir.display());
-        std::process::exit(1);
-    }
+    exit_on_error(
+        fs::create_dir_all(&bergr_conf_dir),
+        &format!("could not create {}", bergr_conf_dir.display()),
+    );
+
     let tmux_conf_path = bergr_conf_dir.join("tmux.conf");
-    if let Err(e) = write_atomic(&tmux_conf_path, &tmux_conf_contents(&bergr_bin)) {
-        eprintln!("bergr init: could not write {}: {e}", tmux_conf_path.display());
-        std::process::exit(1);
-    }
+    exit_on_error(
+        write_atomic(&tmux_conf_path, &tmux_conf_contents(bergr_bin)),
+        &format!("could not write {}", tmux_conf_path.display()),
+    );
 
-    if let Err(e) = state::cache_root().and_then(|root| fs::create_dir_all(&root)) {
-        eprintln!("bergr init: could not create cache root: {e}");
-        std::process::exit(1);
-    }
+    tmux_conf_path
+}
 
+fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
     let user_tmux_conf = home().join(".tmux.conf");
     let source_line = format!("source-file {}", tmux_conf_path.display());
-    let already_sourced = fs::read_to_string(&user_tmux_conf)
-        .map(|t| t.contains(&*tmux_conf_path.to_string_lossy()))
-        .unwrap_or(false);
+    let already_sourced = match fs::read_to_string(&user_tmux_conf) {
+        Ok(t) => t.contains(&*tmux_conf_path.to_string_lossy()),
+        Err(_) => false,
+    };
 
-    println!("bergr init: wrote {}", settings_path.display());
-    println!("bergr init: wrote {}", tmux_conf_path.display());
     if already_sourced {
-        println!("bergr init: {} already sources bergr's tmux config", user_tmux_conf.display());
+        println!(
+            "bergr init: {} already sources bergr's tmux config",
+            user_tmux_conf.display()
+        );
     } else {
         println!(
             "bergr init: add this to {}, then run `tmux source-file {}`:\n    {source_line}",
@@ -186,10 +198,11 @@ pub fn run() {
             user_tmux_conf.display(),
         );
     }
+}
 
+fn warn_about_live_amux_watchers() {
     let legacy_cache = home().join(".cache").join("amux");
-    let live_watchers = find_running_amux_watchers(&legacy_cache);
-    for session in live_watchers {
+    for session in find_running_amux_watchers(&legacy_cache) {
         eprintln!(
             "bergr init: warning: amux watcher still running for session '{session}'. \
              Kill it: kill $(cat {}/{session}/watch.pid)",
@@ -198,14 +211,38 @@ pub fn run() {
     }
 }
 
+/// Runs the `init` command against the real environment: refuses to run from a
+/// `target/` build directory (the hooks would then reference a path that stops
+/// existing on the next `cargo clean`), merges hooks into `~/.claude/settings.json`,
+/// writes `~/.config/bergr/tmux.conf`, creates the cache root, and warns about any
+/// still-running amux watcher.
+pub fn run() {
+    let bergr_bin = resolve_bergr_bin();
+
+    let settings_path = update_claude_settings(&bergr_bin);
+    let tmux_conf_path = write_bergr_tmux_conf(&bergr_bin);
+
+    exit_on_error(
+        state::cache_root().and_then(|root| fs::create_dir_all(&root)),
+        "could not create cache root",
+    );
+
+    println!("bergr init: wrote {}", settings_path.display());
+    println!("bergr init: wrote {}", tmux_conf_path.display());
+    report_tmux_conf_sourcing(&tmux_conf_path);
+    warn_about_live_amux_watchers();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn load_fixture() -> Value {
-        let text =
-            fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/settings.json"))
-                .unwrap();
+        let text = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/settings.json"
+        ))
+        .unwrap();
         serde_json::from_str(&text).unwrap()
     }
 
@@ -241,7 +278,10 @@ mod tests {
                 .iter()
                 .filter(|e| entry_command_contains(e, cmd))
                 .count();
-            assert_eq!(bergr_count, 1, "event {event} should have exactly one bergr entry");
+            assert_eq!(
+                bergr_count, 1,
+                "event {event} should have exactly one bergr entry"
+            );
         }
     }
 
