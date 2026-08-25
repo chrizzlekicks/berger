@@ -162,8 +162,21 @@ fn update_claude_settings(bergr_bin: &str) -> std::path::PathBuf {
     settings_path
 }
 
+fn bergr_config_dir() -> std::path::PathBuf {
+    xdg_subdir("XDG_CONFIG_HOME", ".config", "bergr")
+}
+
+/// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG
+/// var is unset or empty — the same fallback rule the amux prototype used.
+fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> std::path::PathBuf {
+    match std::env::var(xdg_var) {
+        Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir).join(name),
+        _ => home().join(home_fallback_dir).join(name),
+    }
+}
+
 fn write_bergr_tmux_conf(bergr_bin: &str) -> std::path::PathBuf {
-    let bergr_conf_dir = home().join(".config").join("bergr");
+    let bergr_conf_dir = bergr_config_dir();
     exit_on_error(
         fs::create_dir_all(&bergr_conf_dir),
         &format!("could not create {}", bergr_conf_dir.display()),
@@ -178,13 +191,68 @@ fn write_bergr_tmux_conf(bergr_bin: &str) -> std::path::PathBuf {
     tmux_conf_path
 }
 
+fn legacy_amux_tmux_conf_path() -> std::path::PathBuf {
+    xdg_subdir("XDG_CONFIG_HOME", ".config", "amux").join("tmux.conf")
+}
+
+fn is_source_line_for(line: &str, path: &str) -> bool {
+    let line = line.trim();
+    !line.starts_with('#') && line.starts_with("source-file") && line.contains(path)
+}
+
+fn sources_path(tmux_conf_contents: &str, path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    tmux_conf_contents
+        .lines()
+        .any(|line| is_source_line_for(line, &path))
+}
+
+fn strip_source_line(tmux_conf_contents: &str, path: &Path) -> String {
+    let path = path.to_string_lossy();
+    tmux_conf_contents
+        .lines()
+        .filter(|line| !is_source_line_for(line, &path))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// Removes the old amux `source-file` line from `~/.tmux.conf`, backing up the
+/// previous contents once (on first run only, mirroring `update_claude_settings`)
+/// so amux's `bind-key M` can no longer override bergr's.
+fn remove_stale_amux_source_line(user_tmux_conf: &Path, contents: &str) {
+    let legacy_path = legacy_amux_tmux_conf_path();
+    if !sources_path(contents, &legacy_path) {
+        return;
+    }
+
+    let backup_path = user_tmux_conf.with_extension("conf.bergr-bak");
+    if !backup_path.exists() {
+        exit_on_error(
+            fs::copy(user_tmux_conf, &backup_path),
+            "could not back up .tmux.conf",
+        );
+    }
+
+    let updated = strip_source_line(contents, &legacy_path);
+    exit_on_error(
+        write_atomic(user_tmux_conf, &updated),
+        &format!("could not write {}", user_tmux_conf.display()),
+    );
+
+    println!(
+        "bergr init: removed stale amux `source-file` line from {} (backup: {})",
+        user_tmux_conf.display(),
+        backup_path.display()
+    );
+}
+
 fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
     let user_tmux_conf = home().join(".tmux.conf");
     let source_line = format!("source-file {}", tmux_conf_path.display());
-    let already_sourced = match fs::read_to_string(&user_tmux_conf) {
-        Ok(t) => t.contains(&*tmux_conf_path.to_string_lossy()),
-        Err(_) => false,
-    };
+    let contents = fs::read_to_string(&user_tmux_conf).unwrap_or_default();
+    let already_sourced = sources_path(&contents, tmux_conf_path);
+
+    remove_stale_amux_source_line(&user_tmux_conf, &contents);
 
     if already_sourced {
         println!(
@@ -200,8 +268,12 @@ fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
     }
 }
 
+pub(crate) fn legacy_amux_cache_root() -> std::path::PathBuf {
+    xdg_subdir("XDG_CACHE_HOME", ".cache", "amux")
+}
+
 fn warn_about_live_amux_watchers() {
-    let legacy_cache = home().join(".cache").join("amux");
+    let legacy_cache = legacy_amux_cache_root();
     for session in find_running_amux_watchers(&legacy_cache) {
         eprintln!(
             "bergr init: warning: amux watcher still running for session '{session}'. \
@@ -348,5 +420,64 @@ mod tests {
         let mut settings = serde_json::json!([]);
         let result = merge_hooks(&mut settings, "/x/bergr event");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn xdg_subdir_prefers_xdg_var_when_set() {
+        assert_eq!(
+            xdg_subdir("HOME", ".cache", "amux"),
+            home().join("amux"),
+            "HOME is always set, so it should be used verbatim as the XDG base"
+        );
+    }
+
+    #[test]
+    fn xdg_subdir_falls_back_when_var_unset() {
+        assert_eq!(
+            xdg_subdir("BERGR_TEST_UNSET_XDG_VAR", ".cache", "amux"),
+            home().join(".cache").join("amux")
+        );
+    }
+
+    #[test]
+    fn sources_path_ignores_commented_out_line() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "# source-file /home/x/.config/amux/tmux.conf\n";
+        assert!(!sources_path(conf, path));
+    }
+
+    #[test]
+    fn sources_path_detects_real_directive() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "set -g mouse on\nsource-file /home/x/.config/amux/tmux.conf\n";
+        assert!(sources_path(conf, path));
+    }
+
+    #[test]
+    fn legacy_amux_tmux_conf_path_uses_config_fallback_shape() {
+        assert_eq!(
+            legacy_amux_tmux_conf_path(),
+            home().join(".config").join("amux").join("tmux.conf")
+        );
+    }
+
+    #[test]
+    fn strip_source_line_removes_only_the_matching_directive() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "set -g mouse on\nsource-file /home/x/.config/amux/tmux.conf\nset -g history-limit 5000\n";
+        assert_eq!(
+            strip_source_line(conf, path),
+            "set -g mouse on\nset -g history-limit 5000\n"
+        );
+    }
+
+    #[test]
+    fn strip_source_line_keeps_commented_out_line() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "# source-file /home/x/.config/amux/tmux.conf\n";
+        assert_eq!(
+            strip_source_line(conf, path),
+            "# source-file /home/x/.config/amux/tmux.conf\n"
+        );
     }
 }
