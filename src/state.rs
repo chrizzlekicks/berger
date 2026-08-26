@@ -115,8 +115,9 @@ fn parse_state(s: &str) -> Option<State> {
 /// fallback the amux prototype used. Errors if neither is set rather than silently
 /// resolving to a relative path.
 pub fn cache_root() -> io::Result<PathBuf> {
-    if let Ok(xdg) = env::var("XDG_CACHE_HOME") {
-        return Ok(PathBuf::from(xdg).join("bergr"));
+    match env::var("XDG_CACHE_HOME") {
+        Ok(xdg) if !xdg.is_empty() => return Ok(PathBuf::from(xdg).join("bergr")),
+        _ => {}
     }
     let home = env::var("HOME").map_err(|_| {
         io::Error::new(

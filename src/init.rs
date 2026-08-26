@@ -41,7 +41,14 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> 
             .as_array_mut()
             .ok_or_else(|| format!("\"hooks.{event}\" must be an array"))?;
 
-        entries.retain(|entry| !entry_command_contains(entry, "amux"));
+        let mut kept = Vec::new();
+        for mut entry in entries.drain(..) {
+            remove_matching_commands(&mut entry, "amux");
+            if !entry_hooks_is_empty(&entry) {
+                kept.push(entry);
+            }
+        }
+        *entries = kept;
 
         let already_present = entries
             .iter()
@@ -67,8 +74,36 @@ fn entry_command_contains(entry: &Value, needle: &str) -> bool {
         })
 }
 
+/// Drops only the nested `hooks[].command` entries matching `needle`, keeping any
+/// sibling commands in the same group (e.g. an unrelated audit hook next to amux's).
+fn remove_matching_commands(entry: &mut Value, needle: &str) {
+    let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut kept = Vec::new();
+    for hook in inner.drain(..) {
+        let matches = match hook.get("command").and_then(Value::as_str) {
+            Some(c) => c.contains(needle),
+            None => false,
+        };
+        if !matches {
+            kept.push(hook);
+        }
+    }
+    *inner = kept;
+}
+
+fn entry_hooks_is_empty(entry: &Value) -> bool {
+    match entry.get("hooks").and_then(Value::as_array) {
+        Some(inner) => inner.is_empty(),
+        None => true,
+    }
+}
+
 /// Detects a still-running amux watcher so `init` can warn about it — a live watcher
-/// would keep polling the legacy cache dir and fighting bergr's own renames.
+/// would keep polling the legacy cache dir and fighting bergr's own renames. A stale
+/// `watch.pid` (process exited, or its PID reused by something else) does not count:
+/// checking `/proc/<pid>` avoids telling the user to kill an unrelated process.
 pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let Ok(sessions) = fs::read_dir(legacy_cache_root) else {
         return Vec::new();
@@ -76,7 +111,14 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     for entry in sessions {
         let Ok(entry) = entry else { continue };
-        if !entry.path().join("watch.pid").exists() {
+        let pid_path = entry.path().join("watch.pid");
+        let Ok(pid_text) = fs::read_to_string(&pid_path) else {
+            continue;
+        };
+        let Ok(pid) = pid_text.trim().parse::<u32>() else {
+            continue;
+        };
+        if !Path::new("/proc").join(pid.to_string()).exists() {
             continue;
         }
         if let Ok(name) = entry.file_name().into_string() {
@@ -338,6 +380,38 @@ mod tests {
     }
 
     #[test]
+    fn keeps_sibling_command_in_same_hook_group_as_amux() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "amux mark --state working" },
+                            { "type": "command", "command": "audit-log record" }
+                        ]
+                    }
+                ]
+            }
+        });
+        merge_hooks(&mut settings, "/x/bergr event").unwrap();
+
+        let pre_tool_use = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert!(
+            pre_tool_use
+                .iter()
+                .any(|e| entry_command_contains(e, "audit-log record")),
+            "sibling command in the same hook group must survive"
+        );
+        assert!(
+            !pre_tool_use
+                .iter()
+                .any(|e| entry_command_contains(e, "amux")),
+            "amux command must still be removed"
+        );
+    }
+
+    #[test]
     fn every_event_gets_exactly_one_bergr_entry() {
         let mut settings = load_fixture();
         let cmd = "/home/schimetschka/.local/bin/bergr event";
@@ -396,8 +470,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("myproject");
         fs::create_dir_all(&session_dir).unwrap();
-        fs::write(session_dir.join("watch.pid"), "12345").unwrap();
+        fs::write(
+            session_dir.join("watch.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
         assert_eq!(find_running_amux_watchers(dir.path()), vec!["myproject"]);
+    }
+
+    #[test]
+    fn ignores_stale_watcher_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("myproject");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("watch.pid"), "999999999").unwrap();
+        assert!(find_running_amux_watchers(dir.path()).is_empty());
     }
 
     #[test]
