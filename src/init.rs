@@ -262,10 +262,14 @@ fn bergr_config_dir() -> PathBuf {
 }
 
 /// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG
-/// var is unset or empty — the same fallback rule the amux prototype used.
+/// var is unset, empty, or relative — the same fallback rule the amux prototype
+/// used. A relative value is rejected rather than resolved against the current
+/// directory: `init`/`sync` and this process can run from different working
+/// directories, so a relative path would point at different trees for each,
+/// and `legacy_amux_cache_root` feeds this into `bergr reset`'s recursive delete.
 fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
     match env::var(xdg_var) {
-        Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join(name),
+        Ok(dir) if Path::new(&dir).is_absolute() => PathBuf::from(dir).join(name),
         _ => home().join(home_fallback_dir).join(name),
     }
 }
@@ -660,6 +664,19 @@ mod tests {
             xdg_subdir("BERGR_TEST_UNSET_XDG_VAR", ".cache", "amux"),
             home().join(".cache").join("amux")
         );
+    }
+
+    #[test]
+    fn xdg_subdir_falls_back_when_var_relative() {
+        // SAFETY: single-threaded test, restored immediately after use.
+        unsafe {
+            env::set_var("BERGR_TEST_RELATIVE_XDG_VAR", "relative/cache");
+        }
+        let result = xdg_subdir("BERGR_TEST_RELATIVE_XDG_VAR", ".cache", "amux");
+        unsafe {
+            env::remove_var("BERGR_TEST_RELATIVE_XDG_VAR");
+        }
+        assert_eq!(result, home().join(".cache").join("amux"));
     }
 
     #[test]
