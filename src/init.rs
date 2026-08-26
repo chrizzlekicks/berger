@@ -195,25 +195,55 @@ fn legacy_amux_tmux_conf_path() -> std::path::PathBuf {
     xdg_subdir("XDG_CONFIG_HOME", ".config", "amux").join("tmux.conf")
 }
 
-fn sources_path(tmux_conf_contents: &str, path: &Path) -> bool {
-    let path = path.to_string_lossy();
-    tmux_conf_contents.lines().any(|line| {
-        let line = line.trim();
-        !line.starts_with('#') && line.starts_with("source-file") && line.contains(&*path)
-    })
+fn is_source_line_for(line: &str, path: &str) -> bool {
+    let line = line.trim();
+    !line.starts_with('#') && line.starts_with("source-file") && line.contains(path)
 }
 
-fn warn_about_stale_amux_source_line(user_tmux_conf_contents: &str) {
+fn sources_path(tmux_conf_contents: &str, path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    tmux_conf_contents
+        .lines()
+        .any(|line| is_source_line_for(line, &path))
+}
+
+fn strip_source_line(tmux_conf_contents: &str, path: &Path) -> String {
+    let path = path.to_string_lossy();
+    tmux_conf_contents
+        .lines()
+        .filter(|line| !is_source_line_for(line, &path))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// Removes the old amux `source-file` line from `~/.tmux.conf`, backing up the
+/// previous contents once (on first run only, mirroring `update_claude_settings`)
+/// so amux's `bind-key M` can no longer override bergr's.
+fn remove_stale_amux_source_line(user_tmux_conf: &Path, contents: &str) {
     let legacy_path = legacy_amux_tmux_conf_path();
-    if sources_path(user_tmux_conf_contents, &legacy_path) {
-        eprintln!(
-            "bergr init: warning: {} still sources the old amux config ({}). \
-             Remove that `source-file` line — amux's `bind-key M` can otherwise \
-             override bergr's.",
-            home().join(".tmux.conf").display(),
-            legacy_path.display()
+    if !sources_path(contents, &legacy_path) {
+        return;
+    }
+
+    let backup_path = user_tmux_conf.with_extension("conf.bergr-bak");
+    if !backup_path.exists() {
+        exit_on_error(
+            fs::copy(user_tmux_conf, &backup_path),
+            "could not back up .tmux.conf",
         );
     }
+
+    let updated = strip_source_line(contents, &legacy_path);
+    exit_on_error(
+        write_atomic(user_tmux_conf, &updated),
+        &format!("could not write {}", user_tmux_conf.display()),
+    );
+
+    println!(
+        "bergr init: removed stale amux `source-file` line from {} (backup: {})",
+        user_tmux_conf.display(),
+        backup_path.display()
+    );
 }
 
 fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
@@ -222,7 +252,7 @@ fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
     let contents = fs::read_to_string(&user_tmux_conf).unwrap_or_default();
     let already_sourced = sources_path(&contents, tmux_conf_path);
 
-    warn_about_stale_amux_source_line(&contents);
+    remove_stale_amux_source_line(&user_tmux_conf, &contents);
 
     if already_sourced {
         println!(
@@ -428,6 +458,26 @@ mod tests {
         assert_eq!(
             legacy_amux_tmux_conf_path(),
             home().join(".config").join("amux").join("tmux.conf")
+        );
+    }
+
+    #[test]
+    fn strip_source_line_removes_only_the_matching_directive() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "set -g mouse on\nsource-file /home/x/.config/amux/tmux.conf\nset -g history-limit 5000\n";
+        assert_eq!(
+            strip_source_line(conf, path),
+            "set -g mouse on\nset -g history-limit 5000\n"
+        );
+    }
+
+    #[test]
+    fn strip_source_line_keeps_commented_out_line() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "# source-file /home/x/.config/amux/tmux.conf\n";
+        assert_eq!(
+            strip_source_line(conf, path),
+            "# source-file /home/x/.config/amux/tmux.conf\n"
         );
     }
 }
