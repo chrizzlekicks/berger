@@ -161,12 +161,16 @@ pub fn tmux_conf_contents(bergr_bin: &str) -> String {
         "# ~/.config/bergr/tmux.conf — managed by `bergr init`, do not edit\n\
          set -g allow-rename off\n\
          set -g automatic-rename off\n\
-         bind-key M run-shell \"{bergr_bin} sync --session #{{session_name}}\"\n"
+         bind-key M run-shell \"'{bergr_bin}' sync --session #{{session_name}}\"\n"
     )
 }
 
 fn home() -> PathBuf {
-    PathBuf::from(env::var("HOME").expect("HOME must be set"))
+    let home = env::var("HOME").expect("HOME must be set");
+    if home.is_empty() {
+        panic!("HOME must be set");
+    }
+    PathBuf::from(home)
 }
 
 fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -212,7 +216,7 @@ fn update_claude_settings(bergr_bin: &str) -> PathBuf {
     }
 
     exit_on_error(
-        merge_hooks(&mut settings, &format!("{bergr_bin} event")),
+        merge_hooks(&mut settings, &format!("'{bergr_bin}' event")),
         &format!("{} has an unexpected shape", settings_path.display()),
     );
     let rendered = serde_json::to_string_pretty(&settings).unwrap();
@@ -548,8 +552,14 @@ mod tests {
     #[test]
     fn tmux_conf_uses_absolute_path_and_session_flag() {
         let conf = tmux_conf_contents("/home/schimetschka/.local/bin/bergr");
-        assert!(conf.contains("/home/schimetschka/.local/bin/bergr sync --session"));
+        assert!(conf.contains("'/home/schimetschka/.local/bin/bergr' sync --session"));
         assert!(conf.contains("allow-rename off"));
+    }
+
+    #[test]
+    fn tmux_conf_quotes_path_with_spaces() {
+        let conf = tmux_conf_contents("/Users/Jane Doe/.local/bin/bergr");
+        assert!(conf.contains("'/Users/Jane Doe/.local/bin/bergr' sync --session"));
     }
 
     #[test]
