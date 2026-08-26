@@ -263,7 +263,11 @@ fn legacy_amux_tmux_conf_path() -> PathBuf {
 
 fn is_source_line_for(line: &str, path: &str) -> bool {
     let line = line.trim();
-    !line.starts_with('#') && line.starts_with("source-file") && line.contains(path)
+    let Some(rest) = line.strip_prefix("source-file") else {
+        return false;
+    };
+    let arg = rest.trim().trim_matches('"').trim_matches('\'');
+    arg == path
 }
 
 fn sources_path(tmux_conf_contents: &str, path: &Path) -> bool {
@@ -604,6 +608,20 @@ mod tests {
     fn sources_path_detects_real_directive() {
         let path = Path::new("/home/x/.config/amux/tmux.conf");
         let conf = "set -g mouse on\nsource-file /home/x/.config/amux/tmux.conf\n";
+        assert!(sources_path(conf, path));
+    }
+
+    #[test]
+    fn sources_path_ignores_unrelated_path_with_matching_substring() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "source-file /home/x/.config/amux-backup/tmux.conf\n";
+        assert!(!sources_path(conf, path));
+    }
+
+    #[test]
+    fn sources_path_detects_quoted_directive() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "source-file \"/home/x/.config/amux/tmux.conf\"\n";
         assert!(sources_path(conf, path));
     }
 
