@@ -12,6 +12,11 @@ use std::process::Command;
 /// amux prototype's `AMUX_AGENT`, letting the tracked agent differ from the window
 /// name), then the current tmux window name (suffix stripped, since a window bergr
 /// already renamed must still match its own state file), then `basename($PWD)`.
+///
+/// Not unit-tested: every branch depends on process-global state (`env::set_var` is
+/// racy under `cargo test`'s parallel threads without a mutex this codebase doesn't
+/// have yet, and `tmux::current_window_name`/`env::current_dir` aren't injectable).
+/// `strip_suffix`, the one pure piece, is covered in `name.rs`.
 fn resolve_agent() -> String {
     if let Ok(a) = env::var("BERGR_AGENT")
         && !a.is_empty()

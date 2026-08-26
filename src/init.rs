@@ -41,7 +41,14 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> 
             .as_array_mut()
             .ok_or_else(|| format!("\"hooks.{event}\" must be an array"))?;
 
-        entries.retain(|entry| !entry_command_contains(entry, "amux"));
+        let mut kept = Vec::new();
+        for mut entry in entries.drain(..) {
+            remove_matching_commands(&mut entry, "amux");
+            if !entry_hooks_is_empty(&entry) {
+                kept.push(entry);
+            }
+        }
+        *entries = kept;
 
         let already_present = entries
             .iter()
@@ -67,8 +74,37 @@ fn entry_command_contains(entry: &Value, needle: &str) -> bool {
         })
 }
 
+/// Drops only the nested `hooks[].command` entries matching `needle`, keeping any
+/// sibling commands in the same group (e.g. an unrelated audit hook next to amux's).
+fn remove_matching_commands(entry: &mut Value, needle: &str) {
+    let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut kept = Vec::new();
+    for hook in inner.drain(..) {
+        let matches = match hook.get("command").and_then(Value::as_str) {
+            Some(c) => c.contains(needle),
+            None => false,
+        };
+        if !matches {
+            kept.push(hook);
+        }
+    }
+    *inner = kept;
+}
+
+fn entry_hooks_is_empty(entry: &Value) -> bool {
+    match entry.get("hooks").and_then(Value::as_array) {
+        Some(inner) => inner.is_empty(),
+        None => true,
+    }
+}
+
 /// Detects a still-running amux watcher so `init` can warn about it — a live watcher
-/// would keep polling the legacy cache dir and fighting bergr's own renames.
+/// would keep polling the legacy cache dir and fighting bergr's own renames. A stale
+/// `watch.pid` (process exited, or its PID reused by something else) does not count:
+/// checking `/proc/<pid>/cmdline` for "amux watch" avoids telling the user to kill an
+/// unrelated process that happens to have reused the same PID.
 pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let Ok(sessions) = fs::read_dir(legacy_cache_root) else {
         return Vec::new();
@@ -76,7 +112,14 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     for entry in sessions {
         let Ok(entry) = entry else { continue };
-        if !entry.path().join("watch.pid").exists() {
+        let pid_path = entry.path().join("watch.pid");
+        let Ok(pid_text) = fs::read_to_string(&pid_path) else {
+            continue;
+        };
+        let Ok(pid) = pid_text.trim().parse::<u32>() else {
+            continue;
+        };
+        if !is_amux_watch_process(pid) {
             continue;
         }
         if let Ok(name) = entry.file_name().into_string() {
@@ -86,17 +129,77 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     names
 }
 
+/// Confirms PID both is alive and is actually running `amux watch`, not merely that
+/// the PID exists (a stale PID can be reused by an unrelated process).
+#[cfg(target_os = "linux")]
+fn is_amux_watch_process(pid: u32) -> bool {
+    match fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")) {
+        Ok(cmdline) => {
+            let args: Vec<&str> = cmdline
+                .split(|&b| b == 0)
+                .filter(|a| !a.is_empty())
+                .map(|a| std::str::from_utf8(a).unwrap_or(""))
+                .collect();
+            argv_is_amux_watch(&args)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Same check as the Linux path, but without `/proc`: ask `ps` for the command line.
+/// `ps`'s reconstructed string is whitespace-joined, not true argv, so this is only
+/// as precise as splitting on whitespace allows — good enough to reject an unrelated
+/// process whose args merely *mention* "amux" and "watch" somewhere.
+#[cfg(not(target_os = "linux"))]
+fn is_amux_watch_process(pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    let Ok(cmdline) = std::str::from_utf8(&output.stdout) else {
+        return false;
+    };
+    let args: Vec<&str> = cmdline.split_whitespace().collect();
+    argv_is_amux_watch(&args)
+}
+
+/// True when the process's first two words are `amux watch` — not merely present
+/// anywhere in the command line (e.g. `sh -c 'echo amux watch'` must not match).
+/// `args[0]` may itself be `"amux watch"` as one word (amux sets argv[0] that way
+/// via `exec -a`), so words are gathered by splitting each arg on whitespace first.
+fn argv_is_amux_watch(args: &[&str]) -> bool {
+    let mut words = args.iter().flat_map(|a| a.split_whitespace());
+    let Some(program) = words.next() else {
+        return false;
+    };
+    let basename = program.rsplit('/').next().unwrap_or(program);
+    basename == "amux" && words.next() == Some("watch")
+}
+
+/// Quotes `s` for safe use as a single argument in a POSIX shell command line,
+/// even when `s` itself contains single quotes (e.g. `/Users/Jane O'Connor/bergr`).
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 pub fn tmux_conf_contents(bergr_bin: &str) -> String {
     format!(
         "# ~/.config/bergr/tmux.conf — managed by `bergr init`, do not edit\n\
          set -g allow-rename off\n\
          set -g automatic-rename off\n\
-         bind-key M run-shell \"{bergr_bin} sync --session #{{session_name}}\"\n"
+         bind-key M run-shell \"{} sync --session #{{session_name}}\"\n",
+        shell_quote(bergr_bin)
     )
 }
 
 fn home() -> PathBuf {
-    PathBuf::from(env::var("HOME").expect("HOME must be set"))
+    let home = env::var("HOME").expect("HOME must be set");
+    if home.is_empty() {
+        panic!("HOME must be set");
+    }
+    PathBuf::from(home)
 }
 
 fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -142,7 +245,7 @@ fn update_claude_settings(bergr_bin: &str) -> PathBuf {
     }
 
     exit_on_error(
-        merge_hooks(&mut settings, &format!("{bergr_bin} event")),
+        merge_hooks(&mut settings, &format!("{} event", shell_quote(bergr_bin))),
         &format!("{} has an unexpected shape", settings_path.display()),
     );
     let rendered = serde_json::to_string_pretty(&settings).unwrap();
@@ -159,10 +262,14 @@ fn bergr_config_dir() -> PathBuf {
 }
 
 /// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG
-/// var is unset or empty — the same fallback rule the amux prototype used.
+/// var is unset, empty, or relative — the same fallback rule the amux prototype
+/// used. A relative value is rejected rather than resolved against the current
+/// directory: `init`/`sync` and this process can run from different working
+/// directories, so a relative path would point at different trees for each,
+/// and `legacy_amux_cache_root` feeds this into `bergr reset`'s recursive delete.
 fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
     match env::var(xdg_var) {
-        Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join(name),
+        Ok(dir) if Path::new(&dir).is_absolute() => PathBuf::from(dir).join(name),
         _ => home().join(home_fallback_dir).join(name),
     }
 }
@@ -189,7 +296,11 @@ fn legacy_amux_tmux_conf_path() -> PathBuf {
 
 fn is_source_line_for(line: &str, path: &str) -> bool {
     let line = line.trim();
-    !line.starts_with('#') && line.starts_with("source-file") && line.contains(path)
+    let Some(rest) = line.strip_prefix("source-file") else {
+        return false;
+    };
+    let arg = rest.trim().trim_matches('"').trim_matches('\'');
+    arg == path
 }
 
 fn sources_path(tmux_conf_contents: &str, path: &Path) -> bool {
@@ -246,7 +357,7 @@ fn remove_stale_amux_source_line(user_tmux_conf: &Path, contents: &str) {
 
 fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
     let user_tmux_conf = home().join(".tmux.conf");
-    let source_line = format!("source-file {}", tmux_conf_path.display());
+    let source_line = format!("source-file \"{}\"", tmux_conf_path.display());
     let contents = fs::read_to_string(&user_tmux_conf).unwrap_or_default();
     let already_sourced = sources_path(&contents, tmux_conf_path);
 
@@ -338,6 +449,38 @@ mod tests {
     }
 
     #[test]
+    fn keeps_sibling_command_in_same_hook_group_as_amux() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "amux mark --state working" },
+                            { "type": "command", "command": "audit-log record" }
+                        ]
+                    }
+                ]
+            }
+        });
+        merge_hooks(&mut settings, "/x/bergr event").unwrap();
+
+        let pre_tool_use = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert!(
+            pre_tool_use
+                .iter()
+                .any(|e| entry_command_contains(e, "audit-log record")),
+            "sibling command in the same hook group must survive"
+        );
+        assert!(
+            !pre_tool_use
+                .iter()
+                .any(|e| entry_command_contains(e, "amux")),
+            "amux command must still be removed"
+        );
+    }
+
+    #[test]
     fn every_event_gets_exactly_one_bergr_entry() {
         let mut settings = load_fixture();
         let cmd = "/home/schimetschka/.local/bin/bergr event";
@@ -392,19 +535,104 @@ mod tests {
     }
 
     #[test]
+    fn argv_matches_amux_watch() {
+        assert!(argv_is_amux_watch(&["amux", "watch"]));
+        assert!(argv_is_amux_watch(&[
+            "/usr/local/bin/amux",
+            "watch",
+            "--verbose"
+        ]));
+    }
+
+    #[test]
+    fn argv_rejects_unrelated_process() {
+        assert!(!argv_is_amux_watch(&["sleep", "999999"]));
+        assert!(!argv_is_amux_watch(&["amux", "status"]));
+    }
+
+    #[test]
+    fn argv_rejects_words_mentioned_out_of_position() {
+        assert!(!argv_is_amux_watch(&[
+            "sh",
+            "-c",
+            "echo amux watch; sleep 60"
+        ]));
+        assert!(!argv_is_amux_watch(&["watch", "amux"]));
+    }
+
+    #[test]
+    fn ignores_live_pid_that_is_not_amux_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("myproject");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("watch.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        assert!(find_running_amux_watchers(dir.path()).is_empty());
+    }
+
+    #[test]
     fn detects_running_watcher_pid_file() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("myproject");
         fs::create_dir_all(&session_dir).unwrap();
-        fs::write(session_dir.join("watch.pid"), "12345").unwrap();
-        assert_eq!(find_running_amux_watchers(dir.path()), vec!["myproject"]);
+        let mut child = std::process::Command::new("bash")
+            .arg("-c")
+            .arg("exec -a 'amux watch' sleep 60")
+            .spawn()
+            .unwrap();
+        fs::write(session_dir.join("watch.pid"), child.id().to_string()).unwrap();
+
+        // `exec -a` renames argv[0] after bash starts, so poll briefly for it to land
+        // instead of racing the immediate post-spawn state (still "bash -c ...").
+        let mut detected = Vec::new();
+        for _ in 0..50 {
+            detected = find_running_amux_watchers(dir.path());
+            if !detected.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(detected, vec!["myproject"]);
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn ignores_stale_watcher_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("myproject");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("watch.pid"), "999999999").unwrap();
+        assert!(find_running_amux_watchers(dir.path()).is_empty());
     }
 
     #[test]
     fn tmux_conf_uses_absolute_path_and_session_flag() {
         let conf = tmux_conf_contents("/home/schimetschka/.local/bin/bergr");
-        assert!(conf.contains("/home/schimetschka/.local/bin/bergr sync --session"));
+        assert!(conf.contains("'/home/schimetschka/.local/bin/bergr' sync --session"));
         assert!(conf.contains("allow-rename off"));
+    }
+
+    #[test]
+    fn tmux_conf_quotes_path_with_spaces() {
+        let conf = tmux_conf_contents("/Users/Jane Doe/.local/bin/bergr");
+        assert!(conf.contains("'/Users/Jane Doe/.local/bin/bergr' sync --session"));
+    }
+
+    #[test]
+    fn tmux_conf_escapes_path_with_single_quote() {
+        let conf = tmux_conf_contents("/Users/Jane O'Connor/.local/bin/bergr");
+        assert!(conf.contains("'/Users/Jane O'\\''Connor/.local/bin/bergr' sync --session"));
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("has'quote"), "'has'\\''quote'");
     }
 
     #[test]
@@ -439,6 +667,19 @@ mod tests {
     }
 
     #[test]
+    fn xdg_subdir_falls_back_when_var_relative() {
+        // SAFETY: single-threaded test, restored immediately after use.
+        unsafe {
+            env::set_var("BERGR_TEST_RELATIVE_XDG_VAR", "relative/cache");
+        }
+        let result = xdg_subdir("BERGR_TEST_RELATIVE_XDG_VAR", ".cache", "amux");
+        unsafe {
+            env::remove_var("BERGR_TEST_RELATIVE_XDG_VAR");
+        }
+        assert_eq!(result, home().join(".cache").join("amux"));
+    }
+
+    #[test]
     fn sources_path_ignores_commented_out_line() {
         let path = Path::new("/home/x/.config/amux/tmux.conf");
         let conf = "# source-file /home/x/.config/amux/tmux.conf\n";
@@ -449,6 +690,20 @@ mod tests {
     fn sources_path_detects_real_directive() {
         let path = Path::new("/home/x/.config/amux/tmux.conf");
         let conf = "set -g mouse on\nsource-file /home/x/.config/amux/tmux.conf\n";
+        assert!(sources_path(conf, path));
+    }
+
+    #[test]
+    fn sources_path_ignores_unrelated_path_with_matching_substring() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "source-file /home/x/.config/amux-backup/tmux.conf\n";
+        assert!(!sources_path(conf, path));
+    }
+
+    #[test]
+    fn sources_path_detects_quoted_directive() {
+        let path = Path::new("/home/x/.config/amux/tmux.conf");
+        let conf = "source-file \"/home/x/.config/amux/tmux.conf\"\n";
         assert!(sources_path(conf, path));
     }
 

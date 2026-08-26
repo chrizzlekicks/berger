@@ -1,7 +1,7 @@
 use crate::init::legacy_amux_cache_root;
 use crate::state::cache_root;
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 /// Clears bergr's own cache root and the legacy amux cache tree, if present — the
 /// latter so a migration cleans up after itself rather than leaving stale state

@@ -1,6 +1,7 @@
+use crate::name::strip_suffix;
 use crate::reconcile::plan_renames;
 use crate::state::{self, cache_root};
-use crate::tmux;
+use crate::tmux::{self, Window};
 use std::fs;
 use std::process;
 
@@ -40,5 +41,65 @@ pub fn run(session: &str) {
 
     for rename in plan_renames(&records, &windows) {
         tmux::rename_window(session, &rename.index, &rename.new_name);
+    }
+
+    prune_orphaned(session, &records, &windows);
+}
+
+/// Deletes state files for agents whose window no longer exists — the window may
+/// have been killed outside of Claude Code's `SessionEnd` hook, which is the only
+/// other place state gets cleaned up.
+fn prune_orphaned(session: &str, records: &[state::StateRecord], windows: &[Window]) {
+    for record in records {
+        if is_orphaned(record, windows)
+            && let Ok(path) = state::state_path(session, &record.agent)
+        {
+            fs::remove_file(path).ok();
+        }
+    }
+}
+
+/// A record is orphaned when no window's (suffix-stripped) name matches its agent —
+/// the window was closed outside of Claude Code's `SessionEnd` hook.
+fn is_orphaned(record: &state::StateRecord, windows: &[Window]) -> bool {
+    !windows
+        .iter()
+        .any(|w| strip_suffix(&w.name) == record.agent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{State, StateRecord};
+
+    fn record(agent: &str) -> StateRecord {
+        StateRecord {
+            agent: agent.to_string(),
+            state: State::Working,
+            updated_at: "t".to_string(),
+            harness: "claude".to_string(),
+            session: "s".to_string(),
+            window: agent.to_string(),
+        }
+    }
+
+    fn window(name: &str) -> Window {
+        Window {
+            index: "0".to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn orphaned_record_has_no_live_window() {
+        let windows = [window("impl!")];
+        assert!(!is_orphaned(&record("impl"), &windows));
+        assert!(is_orphaned(&record("gone"), &windows));
+    }
+
+    #[test]
+    fn no_orphans_when_every_record_has_a_window() {
+        let windows = [window("impl")];
+        assert!(!is_orphaned(&record("impl"), &windows));
     }
 }
