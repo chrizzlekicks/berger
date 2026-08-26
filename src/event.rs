@@ -122,8 +122,14 @@ fn now_utc() -> String {
     match output {
         Ok(o) => match String::from_utf8(o.stdout) {
             Ok(s) => s.trim().to_string(),
-            Err(_) => String::new(),
+            Err(e) => {
+                eprintln!("bergr event: `date` output was not valid UTF-8: {e}");
+                String::new()
+            }
         },
-        Err(_) => String::new(),
+        Err(e) => {
+            eprintln!("bergr event: could not run `date`: {e}");
+            String::new()
+        }
     }
 }

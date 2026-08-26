@@ -46,7 +46,6 @@ pub fn state_for_event(hook_event_name: &str) -> Option<State> {
         "PermissionRequest" => Some(State::Approval),
         "PostToolUseFailure" | "StopFailure" => Some(State::Error),
         "Stop" => Some(State::Done),
-        "SessionEnd" => None,
         _ => None,
     }
 }
@@ -132,8 +131,21 @@ pub fn cache_root() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".cache").join("bergr"))
 }
 
+/// Encodes `agent` into a single safe filename component: `/` (and any other
+/// path separator) would otherwise nest the state file outside the session
+/// directory `sync` scans, and `..` could escape the cache root entirely.
+///
+/// `session` is not encoded here: `sync::run` derives its scan directory as
+/// `cache_root().join(session)` directly, so encoding it only in `state_path`
+/// would make the two resolve to different directories for the same session.
+fn encode_agent_filename(agent: &str) -> String {
+    agent.replace(['/', '\\'], "_")
+}
+
 pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
-    Ok(cache_root()?.join(session).join(format!("{agent}.state")))
+    Ok(cache_root()?
+        .join(session)
+        .join(format!("{}.state", encode_agent_filename(agent))))
 }
 
 pub fn read_record(path: &Path) -> Option<StateRecord> {
@@ -237,5 +249,22 @@ mod tests {
         let text = "agent=impl\nstate=working\nupdated_at=t\nsession=s\nwindow=w\n";
         let record = StateRecord::from_kv(text).unwrap();
         assert_eq!(record.harness, "");
+    }
+
+    #[test]
+    fn encode_agent_filename_replaces_path_separators() {
+        assert_eq!(encode_agent_filename("feature/foo"), "feature_foo");
+        assert_eq!(encode_agent_filename("impl"), "impl");
+    }
+
+    #[test]
+    fn state_path_has_single_filename_component_for_agent_with_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().to_path_buf();
+        let path = cache_root
+            .join("session")
+            .join(format!("{}.state", encode_agent_filename("feature/foo")));
+        assert_eq!(path.parent().unwrap(), cache_root.join("session"));
+        assert_eq!(path.file_name().unwrap(), "feature_foo.state");
     }
 }
