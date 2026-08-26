@@ -3,14 +3,17 @@ use crate::hook::HookPayload;
 use crate::name::strip_suffix;
 use crate::state::{self, StateRecord};
 use crate::tmux;
-use std::io::Read;
+use std::env;
+use std::fs;
+use std::io::{Read, stdin};
+use std::process::Command;
 
 /// Resolves the agent name for this invocation: `$BERGR_AGENT` overrides (mirrors the
 /// amux prototype's `AMUX_AGENT`, letting the tracked agent differ from the window
 /// name), then the current tmux window name (suffix stripped, since a window bergr
 /// already renamed must still match its own state file), then `basename($PWD)`.
 fn resolve_agent() -> String {
-    if let Ok(a) = std::env::var("BERGR_AGENT")
+    if let Ok(a) = env::var("BERGR_AGENT")
         && !a.is_empty()
     {
         return strip_suffix(&a);
@@ -18,7 +21,7 @@ fn resolve_agent() -> String {
     if let Some(window) = tmux::current_window_name() {
         return strip_suffix(&window);
     }
-    match std::env::current_dir() {
+    match env::current_dir() {
         Ok(p) => match p.file_name() {
             Some(n) => n.to_string_lossy().into_owned(),
             None => String::new(),
@@ -36,7 +39,7 @@ fn resolve_agent() -> String {
 /// user's session.
 pub fn run() {
     let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
+    if stdin().read_to_string(&mut input).is_err() {
         eprintln!("bergr event: failed to read stdin");
         return;
     }
@@ -70,7 +73,7 @@ pub fn run() {
             // suffix from the window, rather than leaving it stale. This is the one
             // path where, with no watcher to notice the file vanish, bergr itself
             // must actively clear the suffix.
-            let _ = std::fs::remove_file(&path);
+            let _ = fs::remove_file(&path);
             rename_matching_window(&session, &agent, &agent);
         }
         Some(new_state) => {
@@ -96,7 +99,7 @@ fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
     let Some(windows) = tmux::list_windows(session) else {
         return;
     };
-    for window in windows.iter() {
+    for window in windows {
         if strip_suffix(&window.name) != agent {
             continue;
         }
@@ -108,7 +111,7 @@ fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
 
 fn now_utc() -> String {
     // No chrono dependency: shell out, matching the prototype's own `date -u`.
-    let output = std::process::Command::new("date")
+    let output = Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
         .output();
     match output {

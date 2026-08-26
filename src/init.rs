@@ -1,8 +1,9 @@
 use crate::fs_util::write_atomic;
 use crate::state;
 use serde_json::Value;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
@@ -94,8 +95,8 @@ pub fn tmux_conf_contents(bergr_bin: &str) -> String {
     )
 }
 
-fn home() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").expect("HOME must be set"))
+fn home() -> PathBuf {
+    PathBuf::from(env::var("HOME").expect("HOME must be set"))
 }
 
 fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -106,7 +107,7 @@ fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -
 }
 
 fn resolve_bergr_bin() -> String {
-    let exe = std::env::current_exe().expect("could not resolve current executable path");
+    let exe = env::current_exe().expect("could not resolve current executable path");
     if exe.components().any(|c| c.as_os_str() == "target") {
         eprintln!(
             "bergr init: refusing to run from a build directory ({}).\n\
@@ -121,7 +122,7 @@ fn resolve_bergr_bin() -> String {
 /// Merges bergr's hook into `~/.claude/settings.json`, backing up the previous
 /// contents once (on first run only, since re-running init should not clobber
 /// a backup that predates any bergr changes).
-fn update_claude_settings(bergr_bin: &str) -> std::path::PathBuf {
+fn update_claude_settings(bergr_bin: &str) -> PathBuf {
     let settings_path = home().join(".claude").join("settings.json");
 
     let mut settings: Value = match fs::read_to_string(&settings_path) {
@@ -153,20 +154,20 @@ fn update_claude_settings(bergr_bin: &str) -> std::path::PathBuf {
     settings_path
 }
 
-fn bergr_config_dir() -> std::path::PathBuf {
+fn bergr_config_dir() -> PathBuf {
     xdg_subdir("XDG_CONFIG_HOME", ".config", "bergr")
 }
 
 /// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG
 /// var is unset or empty — the same fallback rule the amux prototype used.
-fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> std::path::PathBuf {
-    match std::env::var(xdg_var) {
-        Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir).join(name),
+fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
+    match env::var(xdg_var) {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join(name),
         _ => home().join(home_fallback_dir).join(name),
     }
 }
 
-fn write_bergr_tmux_conf(bergr_bin: &str) -> std::path::PathBuf {
+fn write_bergr_tmux_conf(bergr_bin: &str) -> PathBuf {
     let bergr_conf_dir = bergr_config_dir();
     exit_on_error(
         fs::create_dir_all(&bergr_conf_dir),
@@ -182,7 +183,7 @@ fn write_bergr_tmux_conf(bergr_bin: &str) -> std::path::PathBuf {
     tmux_conf_path
 }
 
-fn legacy_amux_tmux_conf_path() -> std::path::PathBuf {
+fn legacy_amux_tmux_conf_path() -> PathBuf {
     xdg_subdir("XDG_CONFIG_HOME", ".config", "amux").join("tmux.conf")
 }
 
@@ -265,7 +266,7 @@ fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
     }
 }
 
-pub(crate) fn legacy_amux_cache_root() -> std::path::PathBuf {
+pub(crate) fn legacy_amux_cache_root() -> PathBuf {
     xdg_subdir("XDG_CACHE_HOME", ".cache", "amux")
 }
 

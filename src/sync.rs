@@ -1,6 +1,8 @@
 use crate::reconcile::plan_renames;
 use crate::state::{self, cache_root};
 use crate::tmux;
+use std::fs;
+use std::process;
 
 /// Reconciles every window in a session against its state files — equivalent to one
 /// tick of the amux prototype's polling watcher, run on demand instead of every 2s.
@@ -13,12 +15,12 @@ pub fn run(session: &str) {
         Ok(root) => root.join(session),
         Err(e) => {
             eprintln!("bergr sync: {e}");
-            std::process::exit(1);
+            process::exit(1);
         }
     };
 
     let mut records = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries {
             let Ok(entry) = entry else { continue };
             if entry.path().extension().is_none_or(|ext| ext != "state") {
@@ -33,7 +35,7 @@ pub fn run(session: &str) {
 
     let Some(windows) = tmux::list_windows(session) else {
         eprintln!("bergr sync: could not list windows for session '{session}'");
-        std::process::exit(1);
+        process::exit(1);
     };
 
     for rename in plan_renames(&records, &windows) {

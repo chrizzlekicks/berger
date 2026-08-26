@@ -1,3 +1,4 @@
+use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -114,10 +115,10 @@ fn parse_state(s: &str) -> Option<State> {
 /// fallback the amux prototype used. Errors if neither is set rather than silently
 /// resolving to a relative path.
 pub fn cache_root() -> io::Result<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+    if let Ok(xdg) = env::var("XDG_CACHE_HOME") {
         return Ok(PathBuf::from(xdg).join("bergr"));
     }
-    let home = std::env::var("HOME").map_err(|_| {
+    let home = env::var("HOME").map_err(|_| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "neither XDG_CACHE_HOME nor HOME is set",
