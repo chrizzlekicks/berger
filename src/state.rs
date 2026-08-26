@@ -116,7 +116,7 @@ fn parse_state(s: &str) -> Option<State> {
 /// resolving to a relative path.
 pub fn cache_root() -> io::Result<PathBuf> {
     match env::var("XDG_CACHE_HOME") {
-        Ok(xdg) if !xdg.is_empty() => return Ok(PathBuf::from(xdg).join("bergr")),
+        Ok(xdg) if Path::new(&xdg).is_absolute() => return Ok(PathBuf::from(xdg).join("bergr")),
         _ => {}
     }
     let not_set_err = || {
