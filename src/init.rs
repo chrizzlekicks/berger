@@ -103,7 +103,8 @@ fn entry_hooks_is_empty(entry: &Value) -> bool {
 /// Detects a still-running amux watcher so `init` can warn about it — a live watcher
 /// would keep polling the legacy cache dir and fighting bergr's own renames. A stale
 /// `watch.pid` (process exited, or its PID reused by something else) does not count:
-/// checking `/proc/<pid>` avoids telling the user to kill an unrelated process.
+/// checking `/proc/<pid>/cmdline` for "amux watch" avoids telling the user to kill an
+/// unrelated process that happens to have reused the same PID.
 pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let Ok(sessions) = fs::read_dir(legacy_cache_root) else {
         return Vec::new();
@@ -118,7 +119,7 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
         let Ok(pid) = pid_text.trim().parse::<u32>() else {
             continue;
         };
-        if !Path::new("/proc").join(pid.to_string()).exists() {
+        if !is_amux_watch_process(pid) {
             continue;
         }
         if let Ok(name) = entry.file_name().into_string() {
@@ -126,6 +127,20 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
         }
     }
     names
+}
+
+/// Confirms PID both is alive and is actually running `amux watch`, not merely that
+/// the PID exists (a stale PID can be reused by an unrelated process).
+fn is_amux_watch_process(pid: u32) -> bool {
+    match fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")) {
+        Ok(cmdline) => cmdline_is_amux_watch(&cmdline),
+        Err(_) => false,
+    }
+}
+
+fn cmdline_is_amux_watch(cmdline: &[u8]) -> bool {
+    let cmdline = String::from_utf8_lossy(cmdline).replace('\0', " ");
+    cmdline.contains("amux") && cmdline.contains("watch")
 }
 
 pub fn tmux_conf_contents(bergr_bin: &str) -> String {
@@ -466,7 +481,21 @@ mod tests {
     }
 
     #[test]
-    fn detects_running_watcher_pid_file() {
+    fn cmdline_matches_amux_watch() {
+        assert!(cmdline_is_amux_watch(b"amux\0watch\0"));
+        assert!(cmdline_is_amux_watch(
+            b"/usr/local/bin/amux\0watch\0--verbose\0"
+        ));
+    }
+
+    #[test]
+    fn cmdline_rejects_unrelated_process() {
+        assert!(!cmdline_is_amux_watch(b"sleep\0999999\0"));
+        assert!(!cmdline_is_amux_watch(b"amux\0status\0"));
+    }
+
+    #[test]
+    fn ignores_live_pid_that_is_not_amux_watch() {
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("myproject");
         fs::create_dir_all(&session_dir).unwrap();
@@ -475,7 +504,23 @@ mod tests {
             std::process::id().to_string(),
         )
         .unwrap();
+        assert!(find_running_amux_watchers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn detects_running_watcher_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("myproject");
+        fs::create_dir_all(&session_dir).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exec -a 'amux watch' sleep 60")
+            .spawn()
+            .unwrap();
+        fs::write(session_dir.join("watch.pid"), child.id().to_string()).unwrap();
         assert_eq!(find_running_amux_watchers(dir.path()), vec!["myproject"]);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]
