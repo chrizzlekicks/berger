@@ -1,3 +1,4 @@
+use crate::fs_util::write_atomic;
 use crate::state;
 use serde_json::Value;
 use std::fs;
@@ -91,16 +92,6 @@ fn home() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").expect("HOME must be set"))
 }
 
-/// Writes via tmpfile + rename so a crash mid-write can never leave `path`
-/// truncated or half-written — these files (Claude's hook config, bergr's tmux
-/// config) are read on every session start, unlike state files that get
-/// rewritten constantly and can tolerate a rare loss.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)
-}
-
 fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
     result.unwrap_or_else(|e| {
         eprintln!("bergr init: {context}: {e}");
@@ -126,12 +117,6 @@ fn resolve_bergr_bin() -> String {
 /// a backup that predates any bergr changes).
 fn update_claude_settings(bergr_bin: &str) -> std::path::PathBuf {
     let settings_path = home().join(".claude").join("settings.json");
-    if let Some(dir) = settings_path.parent() {
-        exit_on_error(
-            fs::create_dir_all(dir),
-            &format!("could not create {}", dir.display()),
-        );
-    }
 
     let mut settings: Value = match fs::read_to_string(&settings_path) {
         Ok(text) => exit_on_error(

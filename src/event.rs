@@ -1,3 +1,4 @@
+use crate::fs_util;
 use crate::hook::HookPayload;
 use crate::name::strip_suffix;
 use crate::state::{self, StateRecord};
@@ -78,7 +79,7 @@ pub fn run() {
                 session: session.clone(),
                 window: agent.clone(),
             };
-            if let Err(e) = state::write_atomic(&path, &record.to_kv()) {
+            if let Err(e) = fs_util::write_atomic(&path, &record.to_kv()) {
                 eprintln!("bergr event: failed writing {}: {e}", path.display());
                 return;
             }

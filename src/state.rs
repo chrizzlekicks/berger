@@ -2,7 +2,6 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -131,17 +130,6 @@ pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
     Ok(cache_root()?.join(session).join(format!("{agent}.state")))
 }
 
-/// Sibling temp file + rename — atomic within a filesystem. The pid in the temp name
-/// rules out collisions between concurrent writers without relying on `mktemp`.
-pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension(format!("state.{}.tmp", process::id()));
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)
-}
-
 pub fn read_record(path: &Path) -> Option<StateRecord> {
     let text = fs::read_to_string(path).ok()?;
     StateRecord::from_kv(&text)
@@ -163,28 +151,8 @@ mod io_tests {
             session: "myproject".to_string(),
             window: "impl!".to_string(),
         };
-        write_atomic(&path, &record.to_kv()).unwrap();
+        crate::fs_util::write_atomic(&path, &record.to_kv()).unwrap();
         assert_eq!(read_record(&path), Some(record));
-    }
-
-    #[test]
-    fn write_atomic_creates_parent_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session1").join("impl.state");
-        write_atomic(&path, "agent=impl\n").unwrap();
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn write_atomic_leaves_no_visible_partial_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("impl.state");
-        write_atomic(&path, "agent=impl\nstate=working\n").unwrap();
-        let entries: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(entries, vec![std::ffi::OsString::from("impl.state")]);
     }
 
     #[test]
