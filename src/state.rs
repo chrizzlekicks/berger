@@ -1,3 +1,4 @@
+use crate::fs_util::encode_path_component;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -46,7 +47,6 @@ pub fn state_for_event(hook_event_name: &str) -> Option<State> {
         "PermissionRequest" => Some(State::Approval),
         "PostToolUseFailure" | "StopFailure" => Some(State::Error),
         "Stop" => Some(State::Done),
-        "SessionEnd" => None,
         _ => None,
     }
 }
@@ -115,25 +115,30 @@ fn parse_state(s: &str) -> Option<State> {
 /// fallback the amux prototype used. Errors if neither is set rather than silently
 /// resolving to a relative path.
 pub fn cache_root() -> io::Result<PathBuf> {
-    match env::var("XDG_CACHE_HOME") {
-        Ok(xdg) if Path::new(&xdg).is_absolute() => return Ok(PathBuf::from(xdg).join("bergr")),
-        _ => {}
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
+        let path = PathBuf::from(xdg);
+
+        if path.has_root() {
+            return Ok(path.join("bergr"));
+        }
     }
-    let not_set_err = || {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "neither XDG_CACHE_HOME nor HOME is set",
-        )
-    };
-    let home = env::var("HOME").map_err(|_| not_set_err())?;
-    if home.is_empty() {
-        return Err(not_set_err());
-    }
+
+    let home = env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "neither XDG_CACHE_HOME nor HOME is set",
+            )
+        })?;
+
     Ok(PathBuf::from(home).join(".cache").join("bergr"))
 }
 
 pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
-    Ok(cache_root()?.join(session).join(format!("{agent}.state")))
+    Ok(cache_root()?
+        .join(encode_path_component(session))
+        .join(format!("{}.state", encode_path_component(agent))))
 }
 
 pub fn read_record(path: &Path) -> Option<StateRecord> {
@@ -237,5 +242,30 @@ mod tests {
         let text = "agent=impl\nstate=working\nupdated_at=t\nsession=s\nwindow=w\n";
         let record = StateRecord::from_kv(text).unwrap();
         assert_eq!(record.harness, "");
+    }
+
+    #[test]
+    fn state_path_has_single_filename_component_for_agent_with_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().to_path_buf();
+        let path = cache_root
+            .join("session")
+            .join(format!("{}.state", encode_path_component("feature/foo")));
+        assert_eq!(path.parent().unwrap(), cache_root.join("session"));
+        assert_eq!(path.file_name().unwrap(), "feature%2ffoo.state");
+    }
+
+    #[test]
+    fn state_path_keeps_leading_slash_session_inside_cache_root() {
+        let session = "/workspace/project";
+        let path = state_path(session, "impl").unwrap();
+        let cache_root = cache_root().unwrap();
+        assert!(path.starts_with(&cache_root));
+        assert_eq!(
+            path,
+            cache_root
+                .join(encode_path_component(session))
+                .join("impl.state")
+        );
     }
 }

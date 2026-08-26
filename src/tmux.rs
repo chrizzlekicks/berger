@@ -8,6 +8,16 @@ pub struct Window {
     pub name: String,
 }
 
+fn strip_line_ending(mut s: String) -> String {
+    if s.ends_with('\n') {
+        s.pop();
+        if s.ends_with('\r') {
+            s.pop();
+        }
+    }
+    s
+}
+
 pub fn current_session() -> Option<String> {
     let out = Command::new("tmux")
         .args(["display-message", "-p", "#S"])
@@ -16,7 +26,7 @@ pub fn current_session() -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let name = strip_line_ending(String::from_utf8(out.stdout).ok()?);
     if name.is_empty() { None } else { Some(name) }
 }
 
@@ -28,7 +38,7 @@ pub fn current_window_name() -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let name = strip_line_ending(String::from_utf8(out.stdout).ok()?);
     if name.is_empty() { None } else { Some(name) }
 }
 

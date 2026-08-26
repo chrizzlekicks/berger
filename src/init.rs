@@ -16,10 +16,17 @@ const HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
-/// Rewrites `hooks[event]` in-place: entries whose `command` contains "amux" are
-/// dropped, and exactly one entry with `command == bergr_cmd` is ensured to exist.
-/// All other entries (e.g. `{matcher: "Bash", command: "rtk hook claude"}`) are left
-/// untouched, in whatever position they were found.
+/// Rewrites `hooks[event]` in-place: entries whose `command` contains "amux" or is a
+/// previously-generated bergr hook (any path ending in `bergr event`, not just the
+/// current `bergr_cmd`) are dropped, and exactly one entry with `command == bergr_cmd`
+/// is ensured to exist. All other entries (e.g. `{matcher: "Bash", command: "rtk hook
+/// claude"}`) are left untouched, in whatever position they were found.
+///
+/// Recognizing prior bergr hooks by shape (not just exact match against the current
+/// `bergr_cmd`) matters when the binary has moved: without it, re-running `init`
+/// after a reinstall/move would append the new command alongside the old one instead
+/// of replacing it, so every event would invoke both — a removed old binary produces
+/// recurring hook failures.
 ///
 /// `settings` comes from a hand-editable file, not a trusted internal type, so a
 /// shape mismatch (e.g. `"hooks": []` instead of an object) is reported as an error
@@ -44,15 +51,20 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> 
         let mut kept = Vec::new();
         for mut entry in entries.drain(..) {
             remove_matching_commands(&mut entry, "amux");
+            remove_stale_bergr_commands(&mut entry, bergr_cmd);
             if !entry_hooks_is_empty(&entry) {
                 kept.push(entry);
             }
         }
         *entries = kept;
 
+        // Exact match, not `entry_command_contains`'s substring check: a hand-added
+        // command that merely mentions `bergr_cmd` as a substring (e.g. the same
+        // path invoked with extra flags) must not be mistaken for the canonical
+        // hook — that would suppress installing the real one.
         let already_present = entries
             .iter()
-            .any(|entry| entry_command_contains(entry, bergr_cmd));
+            .any(|entry| entry_command_equals(entry, bergr_cmd));
         if !already_present {
             entries.push(serde_json::json!({
                 "hooks": [{ "type": "command", "command": bergr_cmd }]
@@ -62,6 +74,7 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> 
     Ok(())
 }
 
+#[cfg(test)]
 fn entry_command_contains(entry: &Value, needle: &str) -> bool {
     let Some(inner) = entry.get("hooks").and_then(Value::as_array) else {
         return false;
@@ -72,6 +85,15 @@ fn entry_command_contains(entry: &Value, needle: &str) -> bool {
             Some(c) => c.contains(needle),
             None => false,
         })
+}
+
+fn entry_command_equals(entry: &Value, command: &str) -> bool {
+    let Some(inner) = entry.get("hooks").and_then(Value::as_array) else {
+        return false;
+    };
+    inner
+        .iter()
+        .any(|h| h.get("command").and_then(Value::as_str) == Some(command))
 }
 
 /// Drops only the nested `hooks[].command` entries matching `needle`, keeping any
@@ -91,6 +113,44 @@ fn remove_matching_commands(entry: &mut Value, needle: &str) {
         }
     }
     *inner = kept;
+}
+
+/// Drops nested `hooks[].command` entries that are a previously-generated bergr hook
+/// but no longer match the current `bergr_cmd` (e.g. after the binary moved), keeping
+/// any sibling commands in the same group.
+fn remove_stale_bergr_commands(entry: &mut Value, bergr_cmd: &str) {
+    let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut kept = Vec::new();
+    for hook in inner.drain(..) {
+        let stale = match hook.get("command").and_then(Value::as_str) {
+            Some(c) => c != bergr_cmd && is_generated_bergr_command(c),
+            None => false,
+        };
+        if !stale {
+            kept.push(hook);
+        }
+    }
+    *inner = kept;
+}
+
+/// True for a command shaped like a `bergr init`-generated hook: a single
+/// shell-quoted path whose basename is `bergr`, followed by the `event` subcommand.
+/// Matching by shape (not exact string) is what lets re-init recognize its own prior
+/// output even when the binary's path has changed since the last run.
+fn is_generated_bergr_command(command: &str) -> bool {
+    let Some(rest) = command.strip_suffix(" event") else {
+        return false;
+    };
+    // Accept both the current shell-quoted shape and the unquoted shape emitted by
+    // builds before quoting was added (commit 4761c87) — a hook from an older build
+    // of this tool must still be recognized as stale, not just future ones.
+    let path = match rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        Some(quoted_path) => shell_unquote_body(quoted_path),
+        None => rest.to_string(),
+    };
+    Path::new(&path).file_name().and_then(|n| n.to_str()) == Some("bergr")
 }
 
 fn entry_hooks_is_empty(entry: &Value) -> bool {
@@ -184,12 +244,40 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Exact inverse of `shell_quote`'s body (the text between the outer quotes):
+/// walks `body` looking for the literal `'\''` escape sequence at each position,
+/// rather than blindly replacing every occurrence of that substring — a byte-for-byte
+/// scan is required because `shell_quote` only ever emits `'\''` as a whole escape
+/// unit, so any other alignment of those bytes in `body` is real content, not an
+/// escape, and must be left untouched.
+fn shell_unquote_body(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"'\\''") {
+            out.push('\'');
+            i += 4;
+        } else {
+            let ch_len = body[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+            out.push_str(&body[i..i + ch_len]);
+            i += ch_len;
+        }
+    }
+    out
+}
+
 pub fn tmux_conf_contents(bergr_bin: &str) -> String {
+    // `#{q:session_name}` asks tmux itself to shell-quote the expanded session name —
+    // `bergr_bin` is quoted up front since it's known before tmux ever expands this
+    // string, but the session name isn't known until expansion time, so only tmux's
+    // own format modifier can quote it safely (session names may contain spaces,
+    // quotes, `$`, backticks, or `;` — tmux only rejects `.` and `:`).
     format!(
         "# ~/.config/bergr/tmux.conf — managed by `bergr init`, do not edit\n\
          set -g allow-rename off\n\
          set -g automatic-rename off\n\
-         bind-key M run-shell \"{} sync --session #{{session_name}}\"\n",
+         bind-key M run-shell \"{} sync --session #{{q:session_name}}\"\n",
         shell_quote(bergr_bin)
     )
 }
@@ -219,7 +307,14 @@ fn resolve_bergr_bin() -> String {
         );
         std::process::exit(1);
     }
-    exe.to_string_lossy().into_owned()
+    exe.clone().into_os_string().into_string().unwrap_or_else(|_| {
+        eprintln!(
+            "bergr init: executable path is not valid UTF-8 ({}); \
+             move bergr to a path with only UTF-8 characters and re-run init.",
+            exe.display()
+        );
+        std::process::exit(1);
+    })
 }
 
 /// Merges bergr's hook into `~/.claude/settings.json`, backing up the previous
@@ -500,6 +595,49 @@ mod tests {
     }
 
     #[test]
+    fn moved_binary_replaces_stale_bergr_entry_instead_of_appending() {
+        let mut settings = load_fixture();
+        let old_cmd = "'/old/path/bergr' event";
+        merge_hooks(&mut settings, old_cmd).unwrap();
+
+        let new_cmd = "'/new/path/bergr' event";
+        merge_hooks(&mut settings, new_cmd).unwrap();
+
+        for event in HOOK_EVENTS {
+            let entries = settings["hooks"][event].as_array().unwrap();
+            assert!(
+                !entries.iter().any(|e| entry_command_contains(e, old_cmd)),
+                "event {event} should no longer reference the old bergr path"
+            );
+            let new_count = entries
+                .iter()
+                .filter(|e| entry_command_contains(e, new_cmd))
+                .count();
+            assert_eq!(
+                new_count, 1,
+                "event {event} should have exactly one bergr entry after the move"
+            );
+        }
+    }
+
+    #[test]
+    fn is_generated_bergr_command_matches_quoted_path_with_event_suffix() {
+        assert!(is_generated_bergr_command("'/x/bergr' event"));
+        assert!(is_generated_bergr_command(
+            "'/Users/Jane O'\\''Connor/bergr' event"
+        ));
+        assert!(!is_generated_bergr_command("'/x/bergr' sync"));
+        assert!(!is_generated_bergr_command("rtk hook claude"));
+        assert!(!is_generated_bergr_command("'/x/bergr-migration' event"));
+    }
+
+    #[test]
+    fn is_generated_bergr_command_matches_unquoted_legacy_shape() {
+        assert!(is_generated_bergr_command("/x/bergr event"));
+        assert!(!is_generated_bergr_command("/x/bergr-migration event"));
+    }
+
+    #[test]
     fn rerunning_merge_is_a_no_op() {
         let mut settings = load_fixture();
         let cmd = "/home/schimetschka/.local/bin/bergr event";
@@ -621,6 +759,17 @@ mod tests {
     fn tmux_conf_quotes_path_with_spaces() {
         let conf = tmux_conf_contents("/Users/Jane Doe/.local/bin/bergr");
         assert!(conf.contains("'/Users/Jane Doe/.local/bin/bergr' sync --session"));
+    }
+
+    #[test]
+    fn tmux_conf_quotes_expanded_session_name() {
+        // `#{session_name}` is expanded by tmux into the shell command *before* the
+        // shell sees it, so an unquoted expansion is a shell-injection vector via a
+        // maliciously or accidentally named session (tmux only rejects `.` and `:`
+        // in session names — spaces, quotes, `$`, backticks, `;` are all legal).
+        // `#{q:...}` asks tmux itself to shell-quote the expansion.
+        let conf = tmux_conf_contents("/x/bergr");
+        assert!(conf.contains("sync --session #{q:session_name}"));
     }
 
     #[test]

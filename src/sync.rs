@@ -1,3 +1,4 @@
+use crate::fs_util::encode_path_component;
 use crate::name::strip_suffix;
 use crate::reconcile::plan_renames;
 use crate::state::{self, cache_root};
@@ -13,7 +14,7 @@ use std::process;
 /// so `$TMUX_PANE` may not resolve there.
 pub fn run(session: &str) {
     let dir = match cache_root() {
-        Ok(root) => root.join(session),
+        Ok(root) => root.join(encode_path_component(session)),
         Err(e) => {
             eprintln!("bergr sync: {e}");
             process::exit(1);
