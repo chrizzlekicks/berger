@@ -119,12 +119,16 @@ pub fn cache_root() -> io::Result<PathBuf> {
         Ok(xdg) if !xdg.is_empty() => return Ok(PathBuf::from(xdg).join("bergr")),
         _ => {}
     }
-    let home = env::var("HOME").map_err(|_| {
+    let not_set_err = || {
         io::Error::new(
             io::ErrorKind::NotFound,
             "neither XDG_CACHE_HOME nor HOME is set",
         )
-    })?;
+    };
+    let home = env::var("HOME").map_err(|_| not_set_err())?;
+    if home.is_empty() {
+        return Err(not_set_err());
+    }
     Ok(PathBuf::from(home).join(".cache").join("bergr"))
 }
 

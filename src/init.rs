@@ -131,11 +131,24 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
 
 /// Confirms PID both is alive and is actually running `amux watch`, not merely that
 /// the PID exists (a stale PID can be reused by an unrelated process).
+#[cfg(target_os = "linux")]
 fn is_amux_watch_process(pid: u32) -> bool {
     match fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")) {
         Ok(cmdline) => cmdline_is_amux_watch(&cmdline),
         Err(_) => false,
     }
+}
+
+/// Same check as the Linux path, but without `/proc`: ask `ps` for the command line.
+#[cfg(not(target_os = "linux"))]
+fn is_amux_watch_process(pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    cmdline_is_amux_watch(&output.stdout)
 }
 
 fn cmdline_is_amux_watch(cmdline: &[u8]) -> bool {
