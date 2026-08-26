@@ -1,4 +1,5 @@
 mod event;
+mod fs_util;
 mod hook;
 mod init;
 mod name;

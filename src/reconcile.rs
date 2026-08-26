@@ -16,21 +16,29 @@ pub struct Rename {
 /// would produce the window's current name is omitted — this is what makes `event`
 /// and repeated `sync` calls idempotent.
 pub fn plan_renames(records: &[StateRecord], windows: &[Window]) -> Vec<Rename> {
-    windows
-        .iter()
-        .filter_map(|window| {
-            let base = strip_suffix(&window.name);
-            let record = records.iter().find(|r| r.agent == base)?;
-            let new_name = format!("{base}{}", record.state.symbol());
-            if new_name == window.name {
-                return None;
+    let mut renames = Vec::new();
+    for window in windows {
+        let base = strip_suffix(&window.name);
+        let mut matching_record = None;
+        for record in records {
+            if record.agent == base {
+                matching_record = Some(record);
+                break;
             }
-            Some(Rename {
-                index: window.index.clone(),
-                new_name,
-            })
-        })
-        .collect()
+        }
+        let Some(record) = matching_record else {
+            continue;
+        };
+        let new_name = format!("{base}{}", record.state.symbol());
+        if new_name == window.name {
+            continue;
+        }
+        renames.push(Rename {
+            index: window.index.clone(),
+            new_name,
+        });
+    }
+    renames
 }
 
 #[cfg(test)]

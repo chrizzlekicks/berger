@@ -1,7 +1,9 @@
+use crate::fs_util::write_atomic;
 use crate::state;
 use serde_json::Value;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
@@ -71,11 +73,17 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let Ok(sessions) = fs::read_dir(legacy_cache_root) else {
         return Vec::new();
     };
-    sessions
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("watch.pid").exists())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
+    let mut names = Vec::new();
+    for entry in sessions {
+        let Ok(entry) = entry else { continue };
+        if !entry.path().join("watch.pid").exists() {
+            continue;
+        }
+        if let Ok(name) = entry.file_name().into_string() {
+            names.push(name);
+        }
+    }
+    names
 }
 
 pub fn tmux_conf_contents(bergr_bin: &str) -> String {
@@ -87,18 +95,8 @@ pub fn tmux_conf_contents(bergr_bin: &str) -> String {
     )
 }
 
-fn home() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").expect("HOME must be set"))
-}
-
-/// Writes via tmpfile + rename so a crash mid-write can never leave `path`
-/// truncated or half-written — these files (Claude's hook config, bergr's tmux
-/// config) are read on every session start, unlike state files that get
-/// rewritten constantly and can tolerate a rare loss.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)
+fn home() -> PathBuf {
+    PathBuf::from(env::var("HOME").expect("HOME must be set"))
 }
 
 fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -109,7 +107,7 @@ fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -
 }
 
 fn resolve_bergr_bin() -> String {
-    let exe = std::env::current_exe().expect("could not resolve current executable path");
+    let exe = env::current_exe().expect("could not resolve current executable path");
     if exe.components().any(|c| c.as_os_str() == "target") {
         eprintln!(
             "bergr init: refusing to run from a build directory ({}).\n\
@@ -124,14 +122,8 @@ fn resolve_bergr_bin() -> String {
 /// Merges bergr's hook into `~/.claude/settings.json`, backing up the previous
 /// contents once (on first run only, since re-running init should not clobber
 /// a backup that predates any bergr changes).
-fn update_claude_settings(bergr_bin: &str) -> std::path::PathBuf {
+fn update_claude_settings(bergr_bin: &str) -> PathBuf {
     let settings_path = home().join(".claude").join("settings.json");
-    if let Some(dir) = settings_path.parent() {
-        exit_on_error(
-            fs::create_dir_all(dir),
-            &format!("could not create {}", dir.display()),
-        );
-    }
 
     let mut settings: Value = match fs::read_to_string(&settings_path) {
         Ok(text) => exit_on_error(
@@ -162,20 +154,20 @@ fn update_claude_settings(bergr_bin: &str) -> std::path::PathBuf {
     settings_path
 }
 
-fn bergr_config_dir() -> std::path::PathBuf {
+fn bergr_config_dir() -> PathBuf {
     xdg_subdir("XDG_CONFIG_HOME", ".config", "bergr")
 }
 
 /// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG
 /// var is unset or empty — the same fallback rule the amux prototype used.
-fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> std::path::PathBuf {
-    match std::env::var(xdg_var) {
-        Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir).join(name),
+fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
+    match env::var(xdg_var) {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join(name),
         _ => home().join(home_fallback_dir).join(name),
     }
 }
 
-fn write_bergr_tmux_conf(bergr_bin: &str) -> std::path::PathBuf {
+fn write_bergr_tmux_conf(bergr_bin: &str) -> PathBuf {
     let bergr_conf_dir = bergr_config_dir();
     exit_on_error(
         fs::create_dir_all(&bergr_conf_dir),
@@ -191,7 +183,7 @@ fn write_bergr_tmux_conf(bergr_bin: &str) -> std::path::PathBuf {
     tmux_conf_path
 }
 
-fn legacy_amux_tmux_conf_path() -> std::path::PathBuf {
+fn legacy_amux_tmux_conf_path() -> PathBuf {
     xdg_subdir("XDG_CONFIG_HOME", ".config", "amux").join("tmux.conf")
 }
 
@@ -202,18 +194,24 @@ fn is_source_line_for(line: &str, path: &str) -> bool {
 
 fn sources_path(tmux_conf_contents: &str, path: &Path) -> bool {
     let path = path.to_string_lossy();
-    tmux_conf_contents
-        .lines()
-        .any(|line| is_source_line_for(line, &path))
+    for line in tmux_conf_contents.lines() {
+        if is_source_line_for(line, &path) {
+            return true;
+        }
+    }
+    false
 }
 
 fn strip_source_line(tmux_conf_contents: &str, path: &Path) -> String {
     let path = path.to_string_lossy();
-    tmux_conf_contents
-        .lines()
-        .filter(|line| !is_source_line_for(line, &path))
-        .map(|line| format!("{line}\n"))
-        .collect()
+    let mut result = String::new();
+    for line in tmux_conf_contents.lines() {
+        if !is_source_line_for(line, &path) {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
 }
 
 /// Removes the old amux `source-file` line from `~/.tmux.conf`, backing up the
@@ -268,13 +266,14 @@ fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
     }
 }
 
-pub(crate) fn legacy_amux_cache_root() -> std::path::PathBuf {
+pub(crate) fn legacy_amux_cache_root() -> PathBuf {
     xdg_subdir("XDG_CACHE_HOME", ".cache", "amux")
 }
 
 fn warn_about_live_amux_watchers() {
     let legacy_cache = legacy_amux_cache_root();
-    for session in find_running_amux_watchers(&legacy_cache) {
+    let sessions = find_running_amux_watchers(&legacy_cache);
+    for session in sessions {
         eprintln!(
             "bergr init: warning: amux watcher still running for session '{session}'. \
              Kill it: kill $(cat {}/{session}/watch.pid)",

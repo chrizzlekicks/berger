@@ -1,5 +1,7 @@
 use crate::init::legacy_amux_cache_root;
 use crate::state::cache_root;
+use std::path::Path;
+use std::fs;
 
 /// Clears bergr's own cache root and the legacy amux cache tree, if present — the
 /// latter so a migration cleans up after itself rather than leaving stale state
@@ -13,9 +15,9 @@ pub fn run() {
     remove_if_present(&legacy_amux_cache_root());
 }
 
-fn remove_if_present(path: &std::path::Path) {
+fn remove_if_present(path: &Path) {
     if path.exists() {
-        if let Err(e) = std::fs::remove_dir_all(path) {
+        if let Err(e) = fs::remove_dir_all(path) {
             eprintln!("bergr reset: could not remove {}: {e}", path.display());
         } else {
             println!("bergr reset: removed {}", path.display());

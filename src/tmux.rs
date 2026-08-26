@@ -52,15 +52,17 @@ fn rename_window_args(session: &str, index: &str, new_name: &str) -> Vec<String>
 }
 
 fn parse_window_list(text: &str) -> Vec<Window> {
-    text.lines()
-        .filter_map(|line| {
-            let (index, name) = line.split_once(':')?;
-            Some(Window {
-                index: index.to_string(),
-                name: name.to_string(),
-            })
-        })
-        .collect()
+    let mut windows = Vec::new();
+    for line in text.lines() {
+        let Some((index, name)) = line.split_once(':') else {
+            continue;
+        };
+        windows.push(Window {
+            index: index.to_string(),
+            name: name.to_string(),
+        });
+    }
+    windows
 }
 
 pub fn list_windows(session: &str) -> Option<Vec<Window>> {

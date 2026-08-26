@@ -1,15 +1,19 @@
+use crate::fs_util;
 use crate::hook::HookPayload;
 use crate::name::strip_suffix;
 use crate::state::{self, StateRecord};
 use crate::tmux;
-use std::io::Read;
+use std::env;
+use std::fs;
+use std::io::{Read, stdin};
+use std::process::Command;
 
 /// Resolves the agent name for this invocation: `$BERGR_AGENT` overrides (mirrors the
 /// amux prototype's `AMUX_AGENT`, letting the tracked agent differ from the window
 /// name), then the current tmux window name (suffix stripped, since a window bergr
 /// already renamed must still match its own state file), then `basename($PWD)`.
 fn resolve_agent() -> String {
-    if let Ok(a) = std::env::var("BERGR_AGENT")
+    if let Ok(a) = env::var("BERGR_AGENT")
         && !a.is_empty()
     {
         return strip_suffix(&a);
@@ -17,10 +21,13 @@ fn resolve_agent() -> String {
     if let Some(window) = tmux::current_window_name() {
         return strip_suffix(&window);
     }
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_default()
+    match env::current_dir() {
+        Ok(p) => match p.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => String::new(),
+        },
+        Err(_) => String::new(),
+    }
 }
 
 /// Runs the `event` command: reads a hook payload from stdin, updates state, and
@@ -32,7 +39,7 @@ fn resolve_agent() -> String {
 /// user's session.
 pub fn run() {
     let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
+    if stdin().read_to_string(&mut input).is_err() {
         eprintln!("bergr event: failed to read stdin");
         return;
     }
@@ -66,7 +73,7 @@ pub fn run() {
             // suffix from the window, rather than leaving it stale. This is the one
             // path where, with no watcher to notice the file vanish, bergr itself
             // must actively clear the suffix.
-            let _ = std::fs::remove_file(&path);
+            let _ = fs::remove_file(&path);
             rename_matching_window(&session, &agent, &agent);
         }
         Some(new_state) => {
@@ -78,7 +85,7 @@ pub fn run() {
                 session: session.clone(),
                 window: agent.clone(),
             };
-            if let Err(e) = state::write_atomic(&path, &record.to_kv()) {
+            if let Err(e) = fs_util::write_atomic(&path, &record.to_kv()) {
                 eprintln!("bergr event: failed writing {}: {e}", path.display());
                 return;
             }
@@ -92,7 +99,10 @@ fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
     let Some(windows) = tmux::list_windows(session) else {
         return;
     };
-    for window in windows.iter().filter(|w| strip_suffix(&w.name) == agent) {
+    for window in windows {
+        if strip_suffix(&window.name) != agent {
+            continue;
+        }
         if window.name != new_name {
             tmux::rename_window(session, &window.index, new_name);
         }
@@ -101,11 +111,14 @@ fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
 
 fn now_utc() -> String {
     // No chrono dependency: shell out, matching the prototype's own `date -u`.
-    std::process::Command::new("date")
+    let output = Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+        .output();
+    match output {
+        Ok(o) => match String::from_utf8(o.stdout) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => String::new(),
+        },
+        Err(_) => String::new(),
+    }
 }
