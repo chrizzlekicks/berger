@@ -18,10 +18,13 @@ fn resolve_agent() -> String {
     if let Some(window) = tmux::current_window_name() {
         return strip_suffix(&window);
     }
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_default()
+    match std::env::current_dir() {
+        Ok(p) => match p.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => String::new(),
+        },
+        Err(_) => String::new(),
+    }
 }
 
 /// Runs the `event` command: reads a hook payload from stdin, updates state, and
@@ -93,7 +96,10 @@ fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
     let Some(windows) = tmux::list_windows(session) else {
         return;
     };
-    for window in windows.iter().filter(|w| strip_suffix(&w.name) == agent) {
+    for window in windows.iter() {
+        if strip_suffix(&window.name) != agent {
+            continue;
+        }
         if window.name != new_name {
             tmux::rename_window(session, &window.index, new_name);
         }
@@ -102,11 +108,14 @@ fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
 
 fn now_utc() -> String {
     // No chrono dependency: shell out, matching the prototype's own `date -u`.
-    std::process::Command::new("date")
+    let output = std::process::Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+        .output();
+    match output {
+        Ok(o) => match String::from_utf8(o.stdout) {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => String::new(),
+        },
+        Err(_) => String::new(),
+    }
 }

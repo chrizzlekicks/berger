@@ -72,11 +72,17 @@ pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let Ok(sessions) = fs::read_dir(legacy_cache_root) else {
         return Vec::new();
     };
-    sessions
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().join("watch.pid").exists())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect()
+    let mut names = Vec::new();
+    for entry in sessions {
+        let Ok(entry) = entry else { continue };
+        if !entry.path().join("watch.pid").exists() {
+            continue;
+        }
+        if let Ok(name) = entry.file_name().into_string() {
+            names.push(name);
+        }
+    }
+    names
 }
 
 pub fn tmux_conf_contents(bergr_bin: &str) -> String {
@@ -187,18 +193,24 @@ fn is_source_line_for(line: &str, path: &str) -> bool {
 
 fn sources_path(tmux_conf_contents: &str, path: &Path) -> bool {
     let path = path.to_string_lossy();
-    tmux_conf_contents
-        .lines()
-        .any(|line| is_source_line_for(line, &path))
+    for line in tmux_conf_contents.lines() {
+        if is_source_line_for(line, &path) {
+            return true;
+        }
+    }
+    false
 }
 
 fn strip_source_line(tmux_conf_contents: &str, path: &Path) -> String {
     let path = path.to_string_lossy();
-    tmux_conf_contents
-        .lines()
-        .filter(|line| !is_source_line_for(line, &path))
-        .map(|line| format!("{line}\n"))
-        .collect()
+    let mut result = String::new();
+    for line in tmux_conf_contents.lines() {
+        if !is_source_line_for(line, &path) {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
 }
 
 /// Removes the old amux `source-file` line from `~/.tmux.conf`, backing up the
@@ -259,7 +271,8 @@ pub(crate) fn legacy_amux_cache_root() -> std::path::PathBuf {
 
 fn warn_about_live_amux_watchers() {
     let legacy_cache = legacy_amux_cache_root();
-    for session in find_running_amux_watchers(&legacy_cache) {
+    let sessions = find_running_amux_watchers(&legacy_cache);
+    for session in sessions {
         eprintln!(
             "bergr init: warning: amux watcher still running for session '{session}'. \
              Kill it: kill $(cat {}/{session}/watch.pid)",
