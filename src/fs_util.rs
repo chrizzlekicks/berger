@@ -25,6 +25,23 @@ pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// Encodes `component` into a single safe path component: a leading `/` would
+/// otherwise make `PathBuf::join` discard everything joined so far (letting a
+/// session or agent name escape the cache root entirely), and unescaped `/`
+/// or `\` would nest the result under an extra directory level. Escaping is
+/// injective (each byte maps to exactly one output), so two distinct inputs
+/// (e.g. `feature/foo` and `feature_foo`) can never collide on the same path.
+pub fn encode_path_component(component: &str) -> String {
+    let mut encoded = String::with_capacity(component.len());
+    for b in component.bytes() {
+        match b {
+            b'/' | b'\\' | b'%' => encoded.push_str(&format!("%{b:02x}")),
+            _ => encoded.push(b as char),
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +80,24 @@ mod tests {
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn encode_path_component_escapes_separators() {
+        assert_eq!(encode_path_component("feature/foo"), "feature%2ffoo");
+        assert_eq!(encode_path_component("feature\\foo"), "feature%5cfoo");
+        assert_eq!(encode_path_component("impl"), "impl");
+    }
+
+    #[test]
+    fn encode_path_component_is_injective_on_collision_prone_inputs() {
+        assert_ne!(
+            encode_path_component("feature/foo"),
+            encode_path_component("feature_foo")
+        );
+        assert_ne!(
+            encode_path_component("feature%2ffoo"),
+            encode_path_component("feature/foo")
+        );
     }
 }

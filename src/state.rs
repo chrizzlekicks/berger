@@ -1,3 +1,4 @@
+use crate::fs_util::encode_path_component;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -131,21 +132,10 @@ pub fn cache_root() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".cache").join("bergr"))
 }
 
-/// Encodes `agent` into a single safe filename component: `/` (and any other
-/// path separator) would otherwise nest the state file outside the session
-/// directory `sync` scans, and `..` could escape the cache root entirely.
-///
-/// `session` is not encoded here: `sync::run` derives its scan directory as
-/// `cache_root().join(session)` directly, so encoding it only in `state_path`
-/// would make the two resolve to different directories for the same session.
-fn encode_agent_filename(agent: &str) -> String {
-    agent.replace(['/', '\\'], "_")
-}
-
 pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
     Ok(cache_root()?
-        .join(session)
-        .join(format!("{}.state", encode_agent_filename(agent))))
+        .join(encode_path_component(session))
+        .join(format!("{}.state", encode_path_component(agent))))
 }
 
 pub fn read_record(path: &Path) -> Option<StateRecord> {
@@ -252,19 +242,27 @@ mod tests {
     }
 
     #[test]
-    fn encode_agent_filename_replaces_path_separators() {
-        assert_eq!(encode_agent_filename("feature/foo"), "feature_foo");
-        assert_eq!(encode_agent_filename("impl"), "impl");
-    }
-
-    #[test]
     fn state_path_has_single_filename_component_for_agent_with_slash() {
         let dir = tempfile::tempdir().unwrap();
         let cache_root = dir.path().to_path_buf();
         let path = cache_root
             .join("session")
-            .join(format!("{}.state", encode_agent_filename("feature/foo")));
+            .join(format!("{}.state", encode_path_component("feature/foo")));
         assert_eq!(path.parent().unwrap(), cache_root.join("session"));
-        assert_eq!(path.file_name().unwrap(), "feature_foo.state");
+        assert_eq!(path.file_name().unwrap(), "feature%2ffoo.state");
+    }
+
+    #[test]
+    fn state_path_keeps_leading_slash_session_inside_cache_root() {
+        let session = "/workspace/project";
+        let path = state_path(session, "impl").unwrap();
+        let cache_root = cache_root().unwrap();
+        assert!(path.starts_with(&cache_root));
+        assert_eq!(
+            path,
+            cache_root
+                .join(encode_path_component(session))
+                .join("impl.state")
+        );
     }
 }
