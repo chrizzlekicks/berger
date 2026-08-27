@@ -4,8 +4,7 @@ use crate::name::strip_suffix;
 use crate::state::{self, StateRecord};
 use crate::tmux;
 use std::env;
-use std::fs;
-use std::io::{ErrorKind, Read, stdin};
+use std::io::{Read, stdin};
 use std::process::Command;
 
 /// Resolves the agent name: `$BERGR_AGENT` override (mirrors amux's `AMUX_AGENT`),
@@ -72,9 +71,7 @@ pub fn run() {
             // suffix from the window, rather than leaving it stale. This is the one
             // path where, with no watcher to notice the file vanish, bergr itself
             // must actively clear the suffix.
-            if let Err(e) = fs::remove_file(&path)
-                && e.kind() != ErrorKind::NotFound
-            {
+            if let Err(e) = state::remove_state_file(&path) {
                 eprintln!("bergr event: failed deleting {}: {e}", path.display());
                 return;
             }

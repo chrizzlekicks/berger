@@ -2,9 +2,9 @@ use crate::name::strip_suffix;
 use crate::state::StateRecord;
 use crate::tmux::Window;
 
-/// Agent/session names are case-insensitive everywhere (see
+/// Agent/session names fold ASCII case on the on-disk path (see
 /// `fs_util::encode_path_component`), so window-to-record matching must fold
-/// case too, not just the on-disk path.
+/// ASCII case too, to agree with how state files are keyed.
 pub fn agent_matches(window_name: &str, agent: &str) -> bool {
     strip_suffix(window_name).eq_ignore_ascii_case(agent)
 }

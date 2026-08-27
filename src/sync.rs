@@ -3,6 +3,7 @@ use crate::reconcile::plan_renames;
 use crate::state::{self, cache_root};
 use crate::tmux::{self, Window};
 use std::fs;
+use std::path::PathBuf;
 use std::process;
 
 /// Reconciles every window in a session against its state files — one on-demand
@@ -23,11 +24,12 @@ pub fn run(session: &str) {
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries {
             let Ok(entry) = entry else { continue };
-            if entry.path().extension().is_none_or(|ext| ext != "state") {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "state") {
                 continue;
             }
-            if let Some(record) = state::read_record(&entry.path()) {
-                records.push(record);
+            if let Some(record) = state::read_record(&path) {
+                records.push((path, record));
             }
         }
     }
@@ -38,7 +40,8 @@ pub fn run(session: &str) {
         process::exit(1);
     };
 
-    for rename in plan_renames(&records, &windows) {
+    let record_refs: Vec<_> = records.iter().map(|(_, r)| r.clone()).collect();
+    for rename in plan_renames(&record_refs, &windows) {
         if !tmux::rename_window(session, &rename.index, &rename.new_name) {
             eprintln!(
                 "bergr sync: failed to rename window {} to '{}'",
@@ -47,17 +50,18 @@ pub fn run(session: &str) {
         }
     }
 
-    prune_orphaned(session, &records, &windows);
+    prune_orphaned(&records, &windows);
 }
 
 /// Deletes state files for agents whose window no longer exists — the window may
 /// have been killed outside of Claude Code's `SessionEnd` hook, which is the only
-/// other place state gets cleaned up.
-fn prune_orphaned(session: &str, records: &[state::StateRecord], windows: &[Window]) {
-    for record in records {
+/// other place state gets cleaned up. Prunes by the path each record was actually
+/// read from, not a recomputed one, so a name/agent mismatch can't leave orphans
+/// stuck forever.
+fn prune_orphaned(records: &[(PathBuf, state::StateRecord)], windows: &[Window]) {
+    for (path, record) in records {
         if is_orphaned(record, windows)
-            && let Ok(path) = state::state_path(session, &record.agent)
-            && let Err(e) = fs::remove_file(&path)
+            && let Err(e) = state::remove_state_file(path)
         {
             eprintln!("bergr sync: failed removing {}: {e}", path.display());
         }
@@ -140,5 +144,24 @@ mod tests {
     fn window_id_orphans_record_when_window_is_actually_closed() {
         let windows = [window("@2", "other")];
         assert!(is_orphaned(&record_with_window_id("impl", "@1"), &windows));
+    }
+
+    #[test]
+    fn prune_orphaned_deletes_by_the_path_the_record_was_read_from() {
+        // The path a record is pruned by must match where it was actually read
+        // from, not one recomputed from `record.agent` — otherwise a state file
+        // whose name has drifted from its `agent` field is never pruned.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-name.state");
+        std::fs::write(
+            &path,
+            "agent=impl\nstate=working\nharness=claude\nsession=s\n",
+        )
+        .unwrap();
+
+        let records = vec![(path.clone(), record("impl"))];
+        prune_orphaned(&records, &[]);
+
+        assert!(!path.exists());
     }
 }

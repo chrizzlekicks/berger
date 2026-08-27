@@ -155,9 +155,27 @@ pub fn read_record(path: &Path) -> Option<StateRecord> {
     StateRecord::from_kv(&text)
 }
 
+/// Deletes a state file, treating it already being gone as success rather than an
+/// error — both `event` (on `SessionEnd`) and `sync` prune state files, so either
+/// one may find the other already got there first.
+pub fn remove_state_file(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod io_tests {
     use super::*;
+
+    #[test]
+    fn remove_state_file_ignores_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.state");
+        assert!(remove_state_file(&path).is_ok());
+    }
 
     #[test]
     fn write_atomic_then_read_round_trips() {
