@@ -59,14 +59,19 @@ pub struct StateRecord {
     pub harness: String,
     pub session: String,
     pub window: String,
+    pub window_id: Option<String>,
 }
 
 impl StateRecord {
     pub fn to_kv(&self) -> String {
-        format!(
+        let mut kv = format!(
             "agent={}\nstate={}\nupdated_at={}\nharness={}\nsession={}\nwindow={}\n",
             self.agent, self.state, self.updated_at, self.harness, self.session, self.window,
-        )
+        );
+        if let Some(id) = &self.window_id {
+            kv.push_str(&format!("window_id={id}\n"));
+        }
+        kv
     }
 
     pub fn from_kv(text: &str) -> Option<StateRecord> {
@@ -76,6 +81,7 @@ impl StateRecord {
         let mut harness = None;
         let mut session = None;
         let mut window = None;
+        let mut window_id = None;
 
         for line in text.lines() {
             let (key, val) = line.split_once('=')?;
@@ -86,6 +92,7 @@ impl StateRecord {
                 "harness" => harness = Some(val.to_string()),
                 "session" => session = Some(val.to_string()),
                 "window" => window = Some(val.to_string()),
+                "window_id" => window_id = Some(val.to_string()),
                 _ => {}
             }
         }
@@ -97,6 +104,7 @@ impl StateRecord {
             harness: harness.unwrap_or_default(),
             session: session?,
             window: window?,
+            window_id,
         })
     }
 }
@@ -161,6 +169,7 @@ mod io_tests {
             harness: "claude".to_string(),
             session: "myproject".to_string(),
             window: "impl!".to_string(),
+            window_id: Some("@1".to_string()),
         };
         crate::fs_util::write_atomic(&path, &record.to_kv()).unwrap();
         assert_eq!(read_record(&path), Some(record));
@@ -220,6 +229,7 @@ mod tests {
             harness: "claude".to_string(),
             session: "myproject".to_string(),
             window: "impl!".to_string(),
+            window_id: None,
         };
         let text = record.to_kv();
         assert_eq!(StateRecord::from_kv(&text), Some(record));

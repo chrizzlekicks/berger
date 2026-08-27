@@ -5,12 +5,11 @@ use crate::tmux::{self, Window};
 use std::fs;
 use std::process;
 
-/// Reconciles every window in a session against its state files — equivalent to one
-/// tick of the amux prototype's polling watcher, run on demand instead of every 2s.
+/// Reconciles every window in a session against its state files — one on-demand
+/// tick of what amux's polling watcher did every 2s.
 ///
-/// `session` is required rather than inferred, mirroring why the tmux keybinding
-/// passes `#{session_name}` explicitly: `run-shell` does not execute inside a pane,
-/// so `$TMUX_PANE` may not resolve there.
+/// `session` is required rather than inferred: `run-shell` doesn't execute inside
+/// a pane, so `$TMUX_PANE` may not resolve there.
 pub fn run(session: &str) {
     let dir = match cache_root() {
         Ok(root) => root.join(encode_path_component(session)),
@@ -65,12 +64,17 @@ fn prune_orphaned(session: &str, records: &[state::StateRecord], windows: &[Wind
     }
 }
 
-/// A record is orphaned when no window's (suffix-stripped) name matches its agent —
-/// the window was closed outside of Claude Code's `SessionEnd` hook.
+/// A record is orphaned when its window is closed, not merely renamed. A name-based
+/// check alone can't tell those apart (a `BERGR_AGENT`-driven rename also stops
+/// matching by name), so we prefer the stable `window_id` when the record has one;
+/// older records without it fall back to the name-based check.
 fn is_orphaned(record: &state::StateRecord, windows: &[Window]) -> bool {
-    !windows
-        .iter()
-        .any(|w| crate::reconcile::agent_matches(&w.name, &record.agent))
+    match &record.window_id {
+        Some(id) => !windows.iter().any(|w| &w.id == id),
+        None => !windows
+            .iter()
+            .any(|w| crate::reconcile::agent_matches(&w.name, &record.agent)),
+    }
 }
 
 #[cfg(test)]
@@ -86,11 +90,20 @@ mod tests {
             harness: "claude".to_string(),
             session: "s".to_string(),
             window: agent.to_string(),
+            window_id: None,
         }
     }
 
-    fn window(name: &str) -> Window {
+    fn record_with_window_id(agent: &str, window_id: &str) -> StateRecord {
+        StateRecord {
+            window_id: Some(window_id.to_string()),
+            ..record(agent)
+        }
+    }
+
+    fn window(id: &str, name: &str) -> Window {
         Window {
+            id: id.to_string(),
             index: "0".to_string(),
             name: name.to_string(),
         }
@@ -98,20 +111,34 @@ mod tests {
 
     #[test]
     fn orphaned_record_has_no_live_window() {
-        let windows = [window("impl!")];
+        let windows = [window("@1", "impl!")];
         assert!(!is_orphaned(&record("impl"), &windows));
         assert!(is_orphaned(&record("gone"), &windows));
     }
 
     #[test]
     fn no_orphans_when_every_record_has_a_window() {
-        let windows = [window("impl")];
+        let windows = [window("@1", "impl")];
         assert!(!is_orphaned(&record("impl"), &windows));
     }
 
     #[test]
     fn matching_is_case_insensitive() {
-        let windows = [window("Impl!")];
+        let windows = [window("@1", "Impl!")];
         assert!(!is_orphaned(&record("impl"), &windows));
+    }
+
+    #[test]
+    fn window_id_retains_record_when_window_is_only_renamed() {
+        // BERGR_AGENT drifted the window away from a name-based match, but the
+        // window itself (tracked by id) is still alive — must not be pruned.
+        let windows = [window("@1", "project")];
+        assert!(!is_orphaned(&record_with_window_id("impl", "@1"), &windows));
+    }
+
+    #[test]
+    fn window_id_orphans_record_when_window_is_actually_closed() {
+        let windows = [window("@2", "other")];
+        assert!(is_orphaned(&record_with_window_id("impl", "@1"), &windows));
     }
 }

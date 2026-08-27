@@ -16,21 +16,13 @@ const HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
-/// Rewrites `hooks[event]` in-place: entries whose `command` contains "amux" or is a
-/// previously-generated bergr hook (any path ending in `bergr event`, not just the
-/// current `bergr_cmd`) are dropped, and exactly one entry with `command == bergr_cmd`
-/// is ensured to exist. All other entries (e.g. `{matcher: "Bash", command: "rtk hook
-/// claude"}`) are left untouched, in whatever position they were found.
+/// Rewrites `hooks[event]` in-place: drops entries whose `command` contains "amux" or
+/// is a previously-generated bergr hook (any old `bergr_cmd` shape, so a reinstalled
+/// binary replaces rather than duplicates its hook), and ensures exactly one entry
+/// with `command == bergr_cmd`. Unrelated entries are left untouched.
 ///
-/// Recognizing prior bergr hooks by shape (not just exact match against the current
-/// `bergr_cmd`) matters when the binary has moved: without it, re-running `init`
-/// after a reinstall/move would append the new command alongside the old one instead
-/// of replacing it, so every event would invoke both — a removed old binary produces
-/// recurring hook failures.
-///
-/// `settings` comes from a hand-editable file, not a trusted internal type, so a
-/// shape mismatch (e.g. `"hooks": []` instead of an object) is reported as an error
-/// rather than a panic.
+/// `settings` is hand-editable, not a trusted internal type, so a shape mismatch is
+/// reported as an error rather than a panic.
 pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> {
     let root = settings
         .as_object_mut()
@@ -160,11 +152,9 @@ fn entry_hooks_is_empty(entry: &Value) -> bool {
     }
 }
 
-/// Detects a still-running amux watcher so `init` can warn about it — a live watcher
-/// would keep polling the legacy cache dir and fighting bergr's own renames. A stale
-/// `watch.pid` (process exited, or its PID reused by something else) does not count:
-/// checking `/proc/<pid>/cmdline` for "amux watch" avoids telling the user to kill an
-/// unrelated process that happens to have reused the same PID.
+/// Detects a still-running amux watcher so `init` can warn about it. A stale
+/// `watch.pid` doesn't count — checking `/proc/<pid>/cmdline` for "amux watch" avoids
+/// telling the user to kill an unrelated process that reused the same PID.
 pub fn find_running_amux_watchers(legacy_cache_root: &Path) -> Vec<String> {
     let Ok(sessions) = fs::read_dir(legacy_cache_root) else {
         return Vec::new();
@@ -207,9 +197,8 @@ fn is_amux_watch_process(pid: u32) -> bool {
 }
 
 /// Same check as the Linux path, but without `/proc`: ask `ps` for the command line.
-/// `ps`'s reconstructed string is whitespace-joined, not true argv, so this is only
-/// as precise as splitting on whitespace allows — good enough to reject an unrelated
-/// process whose args merely *mention* "amux" and "watch" somewhere.
+/// `ps`'s output is whitespace-joined, not true argv, so this is only as precise as
+/// splitting on whitespace allows.
 #[cfg(not(target_os = "linux"))]
 fn is_amux_watch_process(pid: u32) -> bool {
     let Ok(output) = std::process::Command::new("ps")
@@ -225,10 +214,9 @@ fn is_amux_watch_process(pid: u32) -> bool {
     argv_is_amux_watch(&args)
 }
 
-/// True when the process's first two words are `amux watch` — not merely present
-/// anywhere in the command line (e.g. `sh -c 'echo amux watch'` must not match).
-/// `args[0]` may itself be `"amux watch"` as one word (amux sets argv[0] that way
-/// via `exec -a`), so words are gathered by splitting each arg on whitespace first.
+/// True when the process's first two words are `amux watch`, not merely present
+/// anywhere in the command line. `args[0]` may itself be `"amux watch"` as one word
+/// (amux's `exec -a` sets argv[0] that way), so args are split on whitespace first.
 fn argv_is_amux_watch(args: &[&str]) -> bool {
     let mut words = args.iter().flat_map(|a| a.split_whitespace());
     let Some(program) = words.next() else {
@@ -244,12 +232,9 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Exact inverse of `shell_quote`'s body (the text between the outer quotes):
-/// walks `body` looking for the literal `'\''` escape sequence at each position,
-/// rather than blindly replacing every occurrence of that substring — a byte-for-byte
-/// scan is required because `shell_quote` only ever emits `'\''` as a whole escape
-/// unit, so any other alignment of those bytes in `body` is real content, not an
-/// escape, and must be left untouched.
+/// Exact inverse of `shell_quote`'s body. Scans byte-by-byte for the literal `'\''`
+/// escape unit rather than blindly replacing that substring — any other alignment of
+/// those bytes is real content, not an escape.
 fn shell_unquote_body(body: &str) -> String {
     let bytes = body.as_bytes();
     let mut out = String::with_capacity(body.len());
@@ -299,9 +284,30 @@ fn home() -> PathBuf {
     .into()
 }
 
+/// A Cargo build output directory: `target/{debug,release}/...`, or the
+/// cross-compiled `target/<triple>/{debug,release}/...` — not merely any path with a
+/// `target` component (e.g. `/opt/target/bin/bergr` is a legitimate install path). A
+/// custom Cargo profile name isn't detected; this is a best-effort guard.
+fn is_cargo_build_dir(exe: &Path) -> bool {
+    let components: Vec<_> = exe.components().collect();
+    for (i, c) in components.iter().enumerate() {
+        if c.as_os_str() != "target" {
+            continue;
+        }
+        let is_profile =
+            |c: &std::path::Component| c.as_os_str() == "debug" || c.as_os_str() == "release";
+        if components.get(i + 1).is_some_and(is_profile)
+            || components.get(i + 2).is_some_and(is_profile)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn resolve_bergr_bin() -> String {
     let exe = env::current_exe().expect("could not resolve current executable path");
-    if exe.components().any(|c| c.as_os_str() == "target") {
+    if is_cargo_build_dir(&exe) {
         eprintln!(
             "bergr init: refusing to run from a build directory ({}).\n\
              Install first: cargo install --path . --root ~/.local",
@@ -361,12 +367,10 @@ fn bergr_config_dir() -> PathBuf {
     xdg_subdir("XDG_CONFIG_HOME", ".config", "bergr")
 }
 
-/// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG
-/// var is unset, empty, or relative — the same fallback rule the amux prototype
-/// used. A relative value is rejected rather than resolved against the current
-/// directory: `init`/`sync` and this process can run from different working
-/// directories, so a relative path would point at different trees for each,
-/// and `legacy_amux_cache_root` feeds this into `bergr reset`'s recursive delete.
+/// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG var
+/// is unset, empty, or relative. Relative values are rejected rather than resolved
+/// against the CWD, since `init`/`sync` can run from different working directories
+/// and this feeds `bergr reset`'s recursive delete.
 fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
     match env::var_os(xdg_var) {
         None => home().join(home_fallback_dir).join(name),
@@ -500,11 +504,9 @@ fn warn_about_live_amux_watchers() {
     }
 }
 
-/// Runs the `init` command against the real environment: refuses to run from a
-/// `target/` build directory (the hooks would then reference a path that stops
-/// existing on the next `cargo clean`), merges hooks into `~/.claude/settings.json`,
-/// writes `~/.config/bergr/tmux.conf`, creates the cache root, and warns about any
-/// still-running amux watcher.
+/// Runs the `init` command: refuses to run from a build directory, merges hooks into
+/// `~/.claude/settings.json`, writes `~/.config/bergr/tmux.conf`, creates the cache
+/// root, and warns about any still-running amux watcher.
 pub fn run() {
     let bergr_bin = resolve_bergr_bin();
 
@@ -525,6 +527,34 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_cargo_debug_and_release_output() {
+        assert!(is_cargo_build_dir(Path::new("/repo/target/debug/bergr")));
+        assert!(is_cargo_build_dir(Path::new("/repo/target/release/bergr")));
+    }
+
+    #[test]
+    fn rejects_cross_compiled_cargo_output() {
+        assert!(is_cargo_build_dir(Path::new(
+            "/repo/target/x86_64-unknown-linux-gnu/release/bergr"
+        )));
+    }
+
+    #[test]
+    fn allows_target_as_an_unrelated_path_component() {
+        assert!(!is_cargo_build_dir(Path::new("/opt/target/bin/bergr")));
+        assert!(!is_cargo_build_dir(Path::new(
+            "/home/target/.local/bin/bergr"
+        )));
+    }
+
+    #[test]
+    fn allows_installed_path_with_no_target_component() {
+        assert!(!is_cargo_build_dir(Path::new(
+            "/home/schimetschka/.local/bin/bergr"
+        )));
+    }
 
     fn load_fixture() -> Value {
         let text = fs::read_to_string(concat!(

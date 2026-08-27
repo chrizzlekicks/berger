@@ -1,9 +1,15 @@
 use std::process::Command;
 
-/// A single tmux window: `{window_index}:{window_name}`, as returned by
-/// `tmux list-windows -F '#{window_index}:#{window_name}'`.
+/// A single tmux window: `{window_id}:{window_index}:{window_name}`, as returned by
+/// `tmux list-windows -F '#{window_id}:#{window_index}:#{window_name}'`.
+///
+/// `id` (tmux's `@N` form) is stable for the window's lifetime, unlike `index`, which
+/// shifts when windows are moved or the session is renumbered, and unlike `name`,
+/// which changes on every rename — the only field that can tell "renamed" apart from
+/// "closed".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Window {
+    pub id: String,
     pub index: String,
     pub name: String,
 }
@@ -54,13 +60,25 @@ pub fn current_window_index() -> Option<String> {
     if index.is_empty() { None } else { Some(index) }
 }
 
+pub fn current_window_id() -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "#{window_id}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let id = strip_line_ending(String::from_utf8(out.stdout).ok()?);
+    if id.is_empty() { None } else { Some(id) }
+}
+
 fn list_windows_args(session: &str) -> Vec<String> {
     vec![
         "list-windows".to_string(),
         "-t".to_string(),
         session.to_string(),
         "-F".to_string(),
-        "#{window_index}:#{window_name}".to_string(),
+        "#{window_id}:#{window_index}:#{window_name}".to_string(),
     ]
 }
 
@@ -76,10 +94,14 @@ fn rename_window_args(session: &str, index: &str, new_name: &str) -> Vec<String>
 fn parse_window_list(text: &str) -> Vec<Window> {
     let mut windows = Vec::new();
     for line in text.lines() {
-        let Some((index, name)) = line.split_once(':') else {
+        let Some((id, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Some((index, name)) = rest.split_once(':') else {
             continue;
         };
         windows.push(Window {
+            id: id.to_string(),
             index: index.to_string(),
             name: name.to_string(),
         });
@@ -113,19 +135,22 @@ mod tests {
 
     #[test]
     fn parses_window_list_output() {
-        let text = "0:main\n1:impl!\n2:plan\n";
+        let text = "@0:0:main\n@1:1:impl!\n@2:2:plan\n";
         assert_eq!(
             parse_window_list(text),
             vec![
                 Window {
+                    id: "@0".to_string(),
                     index: "0".to_string(),
                     name: "main".to_string()
                 },
                 Window {
+                    id: "@1".to_string(),
                     index: "1".to_string(),
                     name: "impl!".to_string()
                 },
                 Window {
+                    id: "@2".to_string(),
                     index: "2".to_string(),
                     name: "plan".to_string()
                 },
@@ -139,6 +164,14 @@ mod tests {
     }
 
     #[test]
+    fn window_name_containing_colon_is_kept_intact() {
+        // id and index are colon-free, so splitting on the first two colons only
+        // must leave any further colons in the name untouched.
+        let windows = parse_window_list("@1:1:foo:bar");
+        assert_eq!(windows[0].name, "foo:bar");
+    }
+
+    #[test]
     fn list_windows_args_targets_the_given_session() {
         assert_eq!(
             list_windows_args("myproject"),
@@ -147,7 +180,7 @@ mod tests {
                 "-t",
                 "myproject",
                 "-F",
-                "#{window_index}:#{window_name}"
+                "#{window_id}:#{window_index}:#{window_name}"
             ]
         );
     }

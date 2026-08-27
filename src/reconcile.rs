@@ -61,11 +61,13 @@ mod tests {
             harness: "claude".to_string(),
             session: "s".to_string(),
             window: agent.to_string(),
+            window_id: None,
         }
     }
 
     fn window(index: &str, name: &str) -> Window {
         Window {
+            id: format!("@{index}"),
             index: index.to_string(),
             name: name.to_string(),
         }

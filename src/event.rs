@@ -5,18 +5,14 @@ use crate::state::{self, StateRecord};
 use crate::tmux;
 use std::env;
 use std::fs;
-use std::io::{Read, stdin};
+use std::io::{ErrorKind, Read, stdin};
 use std::process::Command;
 
-/// Resolves the agent name for this invocation: `$BERGR_AGENT` overrides (mirrors the
-/// amux prototype's `AMUX_AGENT`, letting the tracked agent differ from the window
-/// name), then the current tmux window name (suffix stripped, since a window bergr
-/// already renamed must still match its own state file), then `basename($PWD)`.
+/// Resolves the agent name: `$BERGR_AGENT` override (mirrors amux's `AMUX_AGENT`),
+/// else the current tmux window name (suffix stripped), else `basename($PWD)`.
 ///
-/// Not unit-tested: every branch depends on process-global state (`env::set_var` is
-/// racy under `cargo test`'s parallel threads without a mutex this codebase doesn't
-/// have yet, and `tmux::current_window_name`/`env::current_dir` aren't injectable).
-/// `strip_suffix`, the one pure piece, is covered in `name.rs`.
+/// Not unit-tested — every branch depends on process-global state that isn't
+/// injectable/mockable here. `strip_suffix` is covered separately in `name.rs`.
 fn resolve_agent() -> String {
     if let Ok(a) = env::var("BERGR_AGENT")
         && !a.is_empty()
@@ -36,12 +32,10 @@ fn resolve_agent() -> String {
 }
 
 /// Runs the `event` command: reads a hook payload from stdin, updates state, and
-/// (when a tmux session is resolvable) renames the corresponding window.
+/// renames the current window.
 ///
-/// Never fails outward. Every error path is logged to stderr and treated as a no-op —
-/// `bergr event` sits on Claude Code's hook path, where a non-zero exit can block a
-/// tool call or prompt, so a bergr bug must never be able to interfere with the
-/// user's session.
+/// Never fails outward — every error is logged and treated as a no-op, since this
+/// sits on Claude Code's hook path where a non-zero exit could block a tool call.
 pub fn run() {
     let mut input = String::new();
     if stdin().read_to_string(&mut input).is_err() {
@@ -78,7 +72,9 @@ pub fn run() {
             // suffix from the window, rather than leaving it stale. This is the one
             // path where, with no watcher to notice the file vanish, bergr itself
             // must actively clear the suffix.
-            if let Err(e) = fs::remove_file(&path) {
+            if let Err(e) = fs::remove_file(&path)
+                && e.kind() != ErrorKind::NotFound
+            {
                 eprintln!("bergr event: failed deleting {}: {e}", path.display());
                 return;
             }
@@ -93,6 +89,7 @@ pub fn run() {
                 harness: "claude".to_string(),
                 session: session.clone(),
                 window: new_name.clone(),
+                window_id: tmux::current_window_id(),
             };
             if let Err(e) = fs_util::write_atomic(&path, &record.to_kv()) {
                 eprintln!("bergr event: failed writing {}: {e}", path.display());
@@ -103,12 +100,8 @@ pub fn run() {
     }
 }
 
-/// Renames the window bergr is currently running in, targeted by its live index
-/// rather than by matching `agent` against window names. Matching by name breaks
-/// when `BERGR_AGENT` overrides the agent identity away from the actual window name
-/// (e.g. `BERGR_AGENT=impl` in a window named `project`) — the override would never
-/// find a window named `impl` to rename. Targeting the current window by index works
-/// regardless of whether the agent name and window name agree.
+/// Renames the current window by its live index, not by matching `agent` against
+/// window names — that breaks when `BERGR_AGENT` diverges from the window name.
 fn rename_current_window(session: &str, new_name: &str) {
     let Some(index) = tmux::current_window_index() else {
         return;
