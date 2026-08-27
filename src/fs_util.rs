@@ -31,6 +31,11 @@ pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
 /// or `\` would nest the result under an extra directory level. Escaping is
 /// injective (each byte maps to exactly one output), so two distinct inputs
 /// (e.g. `feature/foo` and `feature_foo`) can never collide on the same path.
+///
+/// Lowercased by design: bergr treats agent and session names as case-insensitive
+/// everywhere, not just on case-folding filesystems, so `Impl` and `impl` always
+/// share one state file rather than colliding only on some hosts (e.g. default
+/// macOS volumes) and not others.
 pub fn encode_path_component(component: &str) -> String {
     let mut encoded = String::with_capacity(component.len());
     for b in component.bytes() {
@@ -39,7 +44,7 @@ pub fn encode_path_component(component: &str) -> String {
             _ => encoded.push(b as char),
         }
     }
-    encoded
+    encoded.to_lowercase()
 }
 
 #[cfg(test)]
@@ -99,5 +104,11 @@ mod tests {
             encode_path_component("feature%2ffoo"),
             encode_path_component("feature/foo")
         );
+    }
+
+    #[test]
+    fn encode_path_component_lowercases_by_design() {
+        assert_eq!(encode_path_component("Impl"), encode_path_component("impl"));
+        assert_eq!(encode_path_component("Impl"), "impl");
     }
 }

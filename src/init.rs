@@ -307,14 +307,17 @@ fn resolve_bergr_bin() -> String {
         );
         std::process::exit(1);
     }
-    exe.clone().into_os_string().into_string().unwrap_or_else(|_| {
-        eprintln!(
-            "bergr init: executable path is not valid UTF-8 ({}); \
+    exe.clone()
+        .into_os_string()
+        .into_string()
+        .unwrap_or_else(|_| {
+            eprintln!(
+                "bergr init: executable path is not valid UTF-8 ({}); \
              move bergr to a path with only UTF-8 characters and re-run init.",
-            exe.display()
-        );
-        std::process::exit(1);
-    })
+                exe.display()
+            );
+            std::process::exit(1);
+        })
 }
 
 /// Merges bergr's hook into `~/.claude/settings.json`, backing up the previous

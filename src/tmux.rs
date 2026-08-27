@@ -42,6 +42,18 @@ pub fn current_window_name() -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+pub fn current_window_index() -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "#I"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let index = strip_line_ending(String::from_utf8(out.stdout).ok()?);
+    if index.is_empty() { None } else { Some(index) }
+}
+
 fn list_windows_args(session: &str) -> Vec<String> {
     vec![
         "list-windows".to_string(),

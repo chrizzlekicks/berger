@@ -79,39 +79,38 @@ pub fn run() {
             // path where, with no watcher to notice the file vanish, bergr itself
             // must actively clear the suffix.
             let _ = fs::remove_file(&path);
-            rename_matching_window(&session, &agent, &agent);
+            rename_current_window(&session, &agent);
         }
         Some(new_state) => {
+            let new_name = format!("{agent}{}", new_state.symbol());
             let record = StateRecord {
                 agent: agent.clone(),
                 state: new_state,
                 updated_at: now_utc(),
                 harness: "claude".to_string(),
                 session: session.clone(),
-                window: agent.clone(),
+                window: new_name.clone(),
             };
             if let Err(e) = fs_util::write_atomic(&path, &record.to_kv()) {
                 eprintln!("bergr event: failed writing {}: {e}", path.display());
                 return;
             }
-            let new_name = format!("{agent}{}", new_state.symbol());
-            rename_matching_window(&session, &agent, &new_name);
+            rename_current_window(&session, &new_name);
         }
     }
 }
 
-fn rename_matching_window(session: &str, agent: &str, new_name: &str) {
-    let Some(windows) = tmux::list_windows(session) else {
+/// Renames the window bergr is currently running in, targeted by its live index
+/// rather than by matching `agent` against window names. Matching by name breaks
+/// when `BERGR_AGENT` overrides the agent identity away from the actual window name
+/// (e.g. `BERGR_AGENT=impl` in a window named `project`) — the override would never
+/// find a window named `impl` to rename. Targeting the current window by index works
+/// regardless of whether the agent name and window name agree.
+fn rename_current_window(session: &str, new_name: &str) {
+    let Some(index) = tmux::current_window_index() else {
         return;
     };
-    for window in windows {
-        if strip_suffix(&window.name) != agent {
-            continue;
-        }
-        if window.name != new_name {
-            tmux::rename_window(session, &window.index, new_name);
-        }
-    }
+    tmux::rename_window(session, &index, new_name);
 }
 
 fn now_utc() -> String {
