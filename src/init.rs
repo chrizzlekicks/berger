@@ -147,7 +147,7 @@ fn is_generated_bergr_command(command: &str) -> bool {
     // builds before quoting was added (commit 4761c87) — a hook from an older build
     // of this tool must still be recognized as stale, not just future ones.
     let path = match rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
-        Some(quoted_path) => quoted_path.replace("'\\''", "'"),
+        Some(quoted_path) => shell_unquote_body(quoted_path),
         None => rest.to_string(),
     };
     Path::new(&path).file_name().and_then(|n| n.to_str()) == Some("bergr")
@@ -244,6 +244,29 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Exact inverse of `shell_quote`'s body (the text between the outer quotes):
+/// walks `body` looking for the literal `'\''` escape sequence at each position,
+/// rather than blindly replacing every occurrence of that substring — a byte-for-byte
+/// scan is required because `shell_quote` only ever emits `'\''` as a whole escape
+/// unit, so any other alignment of those bytes in `body` is real content, not an
+/// escape, and must be left untouched.
+fn shell_unquote_body(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"'\\''") {
+            out.push('\'');
+            i += 4;
+        } else {
+            let ch_len = body[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+            out.push_str(&body[i..i + ch_len]);
+            i += ch_len;
+        }
+    }
+    out
+}
+
 pub fn tmux_conf_contents(bergr_bin: &str) -> String {
     // `#{q:session_name}` asks tmux itself to shell-quote the expanded session name —
     // `bergr_bin` is quoted up front since it's known before tmux ever expands this
@@ -284,7 +307,14 @@ fn resolve_bergr_bin() -> String {
         );
         std::process::exit(1);
     }
-    exe.to_string_lossy().into_owned()
+    exe.clone().into_os_string().into_string().unwrap_or_else(|_| {
+        eprintln!(
+            "bergr init: executable path is not valid UTF-8 ({}); \
+             move bergr to a path with only UTF-8 characters and re-run init.",
+            exe.display()
+        );
+        std::process::exit(1);
+    })
 }
 
 /// Merges bergr's hook into `~/.claude/settings.json`, backing up the previous
