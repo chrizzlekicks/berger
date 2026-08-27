@@ -2,6 +2,13 @@ use crate::name::strip_suffix;
 use crate::state::StateRecord;
 use crate::tmux::Window;
 
+/// Agent/session names are case-insensitive everywhere (see
+/// `fs_util::encode_path_component`), so window-to-record matching must fold
+/// case too, not just the on-disk path.
+pub fn agent_matches(window_name: &str, agent: &str) -> bool {
+    strip_suffix(window_name).eq_ignore_ascii_case(agent)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rename {
     pub index: String,
@@ -21,7 +28,7 @@ pub fn plan_renames(records: &[StateRecord], windows: &[Window]) -> Vec<Rename> 
         let base = strip_suffix(&window.name);
         let mut matching_record = None;
         for record in records {
-            if record.agent == base {
+            if agent_matches(&window.name, &record.agent) {
                 matching_record = Some(record);
                 break;
             }
@@ -86,6 +93,19 @@ mod tests {
             vec![Rename {
                 index: "1".to_string(),
                 new_name: "impl\u{2713}".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn matches_window_regardless_of_case() {
+        let records = vec![record("impl", State::Approval)];
+        let windows = vec![window("1", "Impl")];
+        assert_eq!(
+            plan_renames(&records, &windows),
+            vec![Rename {
+                index: "1".to_string(),
+                new_name: "Impl!".to_string()
             }]
         );
     }

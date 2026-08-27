@@ -1,5 +1,4 @@
 use crate::fs_util::encode_path_component;
-use crate::name::strip_suffix;
 use crate::reconcile::plan_renames;
 use crate::state::{self, cache_root};
 use crate::tmux::{self, Window};
@@ -41,7 +40,12 @@ pub fn run(session: &str) {
     };
 
     for rename in plan_renames(&records, &windows) {
-        tmux::rename_window(session, &rename.index, &rename.new_name);
+        if !tmux::rename_window(session, &rename.index, &rename.new_name) {
+            eprintln!(
+                "bergr sync: failed to rename window {} to '{}'",
+                rename.index, rename.new_name
+            );
+        }
     }
 
     prune_orphaned(session, &records, &windows);
@@ -54,8 +58,9 @@ fn prune_orphaned(session: &str, records: &[state::StateRecord], windows: &[Wind
     for record in records {
         if is_orphaned(record, windows)
             && let Ok(path) = state::state_path(session, &record.agent)
+            && let Err(e) = fs::remove_file(&path)
         {
-            fs::remove_file(path).ok();
+            eprintln!("bergr sync: failed removing {}: {e}", path.display());
         }
     }
 }
@@ -65,7 +70,7 @@ fn prune_orphaned(session: &str, records: &[state::StateRecord], windows: &[Wind
 fn is_orphaned(record: &state::StateRecord, windows: &[Window]) -> bool {
     !windows
         .iter()
-        .any(|w| strip_suffix(&w.name) == record.agent)
+        .any(|w| crate::reconcile::agent_matches(&w.name, &record.agent))
 }
 
 #[cfg(test)]
@@ -101,6 +106,12 @@ mod tests {
     #[test]
     fn no_orphans_when_every_record_has_a_window() {
         let windows = [window("impl")];
+        assert!(!is_orphaned(&record("impl"), &windows));
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        let windows = [window("Impl!")];
         assert!(!is_orphaned(&record("impl"), &windows));
     }
 }

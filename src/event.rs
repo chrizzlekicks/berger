@@ -78,7 +78,10 @@ pub fn run() {
             // suffix from the window, rather than leaving it stale. This is the one
             // path where, with no watcher to notice the file vanish, bergr itself
             // must actively clear the suffix.
-            let _ = fs::remove_file(&path);
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!("bergr event: failed deleting {}: {e}", path.display());
+                return;
+            }
             rename_current_window(&session, &agent);
         }
         Some(new_state) => {
@@ -110,7 +113,9 @@ fn rename_current_window(session: &str, new_name: &str) {
     let Some(index) = tmux::current_window_index() else {
         return;
     };
-    tmux::rename_window(session, &index, new_name);
+    if !tmux::rename_window(session, &index, new_name) {
+        eprintln!("bergr event: failed to rename window {index} to '{new_name}'");
+    }
 }
 
 fn now_utc() -> String {

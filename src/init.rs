@@ -282,19 +282,21 @@ pub fn tmux_conf_contents(bergr_bin: &str) -> String {
     )
 }
 
-fn home() -> PathBuf {
-    let home = env::var("HOME").expect("HOME must be set");
-    if home.is_empty() {
-        panic!("HOME must be set");
-    }
-    PathBuf::from(home)
-}
-
 fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
     result.unwrap_or_else(|e| {
         eprintln!("bergr init: {context}: {e}");
         std::process::exit(1);
     })
+}
+
+fn home() -> PathBuf {
+    exit_on_error(
+        env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .ok_or("HOME is not set"),
+        "resolving home directory",
+    )
+    .into()
 }
 
 fn resolve_bergr_bin() -> String {
@@ -366,9 +368,16 @@ fn bergr_config_dir() -> PathBuf {
 /// directories, so a relative path would point at different trees for each,
 /// and `legacy_amux_cache_root` feeds this into `bergr reset`'s recursive delete.
 fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
-    match env::var(xdg_var) {
-        Ok(dir) if Path::new(&dir).is_absolute() => PathBuf::from(dir).join(name),
-        _ => home().join(home_fallback_dir).join(name),
+    match env::var_os(xdg_var) {
+        None => home().join(home_fallback_dir).join(name),
+        Some(dir) => {
+            let dir = exit_on_error(dir.into_string().map_err(|_| "not valid UTF-8"), xdg_var);
+            if Path::new(&dir).is_absolute() {
+                PathBuf::from(dir).join(name)
+            } else {
+                home().join(home_fallback_dir).join(name)
+            }
+        }
     }
 }
 
