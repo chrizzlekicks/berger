@@ -274,14 +274,23 @@ fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -
     })
 }
 
+/// Requires `value` to be an absolute path, matching `state::cache_root()`'s check
+/// on `HOME` — a relative HOME (e.g. `work`) would otherwise make callers write
+/// settings and config paths below the current directory instead of the user's
+/// home. Pure function of its input so the validation is testable without
+/// mutating the process's real `HOME` env var.
+fn validate_home(value: Option<std::ffi::OsString>) -> Result<PathBuf, &'static str> {
+    value
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute())
+        .ok_or("HOME is not set or is not an absolute path")
+}
+
 fn home() -> PathBuf {
     exit_on_error(
-        env::var_os("HOME")
-            .filter(|h| !h.is_empty())
-            .ok_or("HOME is not set"),
+        validate_home(env::var_os("HOME")),
         "resolving home directory",
     )
-    .into()
 }
 
 /// A Cargo build output directory: `target/{debug,release}/...`, or the
@@ -531,6 +540,29 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_home_accepts_absolute_path() {
+        assert_eq!(
+            validate_home(Some("/home/jane".into())),
+            Ok(PathBuf::from("/home/jane"))
+        );
+    }
+
+    #[test]
+    fn validate_home_rejects_relative_path() {
+        assert!(validate_home(Some("work".into())).is_err());
+    }
+
+    #[test]
+    fn validate_home_rejects_empty() {
+        assert!(validate_home(Some("".into())).is_err());
+    }
+
+    #[test]
+    fn validate_home_rejects_unset() {
+        assert!(validate_home(None).is_err());
+    }
 
     #[test]
     fn rejects_cargo_debug_and_release_output() {

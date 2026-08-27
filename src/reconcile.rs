@@ -15,20 +15,34 @@ pub struct Rename {
     pub new_name: String,
 }
 
+/// True when `record` is the one `window` represents: matched by the record's
+/// stable `window_id` when it has one — this is what lets a window whose name has
+/// drifted away from its agent (e.g. via `BERGR_AGENT`) still be found. Records with
+/// no `window_id` (written before that field existed) fall back to matching by
+/// name, with any suffix stripped.
+///
+/// Shared by `plan_renames` (below) and `event`'s `SessionEnd` handler, so both
+/// agree on how a window's record is identified rather than by re-deriving a path
+/// from an agent name.
+pub fn window_matches_record(window: &Window, record: &StateRecord) -> bool {
+    match &record.window_id {
+        Some(id) => &window.id == id,
+        None => agent_matches(&window.name, &record.agent),
+    }
+}
+
 /// Given every state record for a session and every window currently in that
 /// session, compute the renames needed to make window names reflect state.
 ///
-/// A window matches a record when its name, with any suffix stripped, equals the
-/// record's agent. Windows with no matching record are left alone. A rename that
-/// would produce the window's current name is omitted — this is what makes `event`
-/// and repeated `sync` calls idempotent.
+/// Windows with no matching record (see `window_matches_record`) are left alone. A
+/// rename that would produce the window's current name is omitted — this is what
+/// makes `event` and repeated `sync` calls idempotent.
 pub fn plan_renames(records: &[StateRecord], windows: &[Window]) -> Vec<Rename> {
     let mut renames = Vec::new();
     for window in windows {
-        let base = strip_suffix(&window.name);
         let mut matching_record = None;
         for record in records {
-            if agent_matches(&window.name, &record.agent) {
+            if window_matches_record(window, record) {
                 matching_record = Some(record);
                 break;
             }
@@ -36,6 +50,7 @@ pub fn plan_renames(records: &[StateRecord], windows: &[Window]) -> Vec<Rename> 
         let Some(record) = matching_record else {
             continue;
         };
+        let base = strip_suffix(&window.name);
         let new_name = format!("{base}{}", record.state.symbol());
         if new_name == window.name {
             continue;
@@ -148,5 +163,29 @@ mod tests {
     #[test]
     fn empty_inputs_produce_no_renames() {
         assert!(plan_renames(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn matches_by_window_id_when_name_has_drifted_from_agent() {
+        // BERGR_AGENT="impl" in a window actually named "project": name-based
+        // matching would miss this record entirely, but window_id still finds it.
+        let mut drifted = record("impl", State::Approval);
+        drifted.window_id = Some("@1".to_string());
+        let windows = vec![window("1", "project")];
+        assert_eq!(
+            plan_renames(&[drifted], &windows),
+            vec![Rename {
+                index: "1".to_string(),
+                new_name: "project!".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn window_id_takes_priority_over_a_coincidental_name_match() {
+        let mut record_for_other_window = record("impl", State::Approval);
+        record_for_other_window.window_id = Some("@2".to_string());
+        let windows = vec![window("1", "impl")];
+        assert!(plan_renames(&[record_for_other_window], &windows).is_empty());
     }
 }

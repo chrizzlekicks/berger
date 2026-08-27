@@ -1,8 +1,7 @@
 use crate::fs_util::encode_path_component;
-use crate::reconcile::plan_renames;
+use crate::reconcile::{plan_renames, window_matches_record};
 use crate::state::{self, cache_root};
 use crate::tmux::{self, Window};
-use std::fs;
 use std::path::PathBuf;
 use std::process;
 
@@ -20,20 +19,7 @@ pub fn run(session: &str) {
         }
     };
 
-    let mut records = Vec::new();
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries {
-            let Ok(entry) = entry else { continue };
-            let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "state") {
-                continue;
-            }
-            if let Some(record) = state::read_record(&path) {
-                records.push((path, record));
-            }
-        }
-    }
-    // else: no state for this session yet — nothing to reconcile
+    let records = state::read_session_records(&dir);
 
     let Some(windows) = tmux::list_windows(session) else {
         eprintln!("bergr sync: could not list windows for session '{session}'");
@@ -68,17 +54,13 @@ fn prune_orphaned(records: &[(PathBuf, state::StateRecord)], windows: &[Window])
     }
 }
 
-/// A record is orphaned when its window is closed, not merely renamed. A name-based
-/// check alone can't tell those apart (a `BERGR_AGENT`-driven rename also stops
-/// matching by name), so we prefer the stable `window_id` when the record has one;
-/// older records without it fall back to the name-based check.
+/// A record is orphaned when no live window matches it (see
+/// `reconcile::window_matches_record`) — i.e. its window is closed, not merely
+/// renamed. A name-based check alone can't tell those apart (a `BERGR_AGENT`-driven
+/// rename also stops matching by name), which is why that shared check prefers the
+/// stable `window_id` when the record has one.
 fn is_orphaned(record: &state::StateRecord, windows: &[Window]) -> bool {
-    match &record.window_id {
-        Some(id) => !windows.iter().any(|w| &w.id == id),
-        None => !windows
-            .iter()
-            .any(|w| crate::reconcile::agent_matches(&w.name, &record.agent)),
-    }
+    !windows.iter().any(|w| window_matches_record(w, record))
 }
 
 #[cfg(test)]

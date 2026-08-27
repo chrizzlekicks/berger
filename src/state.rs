@@ -155,6 +155,38 @@ pub fn read_record(path: &Path) -> Option<StateRecord> {
     StateRecord::from_kv(&text)
 }
 
+/// Reads every `.state` file directly inside `dir`, paired with the path each was
+/// read from. A missing `dir` (no state recorded yet) yields an empty result, not an
+/// error — that's the expected state before any event has fired for a session. A
+/// file that fails to parse is skipped and logged, since a corrupt record is a real
+/// signal distinct from "not present".
+///
+/// Shared by `event`'s `SessionEnd` handling and `sync`'s reconciliation, so both
+/// agree on how a session's records are enumerated and paired with their paths.
+pub fn read_session_records(dir: &Path) -> Vec<(PathBuf, StateRecord)> {
+    let mut records = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return records,
+        Err(e) => {
+            eprintln!("bergr: cannot scan {}: {e}", dir.display());
+            return records;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "state") {
+            continue;
+        }
+        match read_record(&path) {
+            Some(record) => records.push((path, record)),
+            None => eprintln!("bergr: could not parse {}", path.display()),
+        }
+    }
+    records
+}
+
 /// Deletes a state file, treating it already being gone as success rather than an
 /// error — both `event` (on `SessionEnd`) and `sync` prune state files, so either
 /// one may find the other already got there first.
@@ -175,6 +207,73 @@ mod io_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gone.state");
         assert!(remove_state_file(&path).is_ok());
+    }
+
+    fn write_state_file(dir: &Path, name: &str, agent: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(
+            &path,
+            format!(
+                "agent={agent}\nstate=working\nupdated_at=t\nharness=claude\nsession=s\nwindow={agent}\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn read_session_records_is_empty_for_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(read_session_records(&missing).is_empty());
+    }
+
+    #[test]
+    fn read_session_records_reads_every_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_state_file(dir.path(), "impl.state", "impl");
+        write_state_file(dir.path(), "plan.state", "plan");
+
+        let mut agents: Vec<_> = read_session_records(dir.path())
+            .into_iter()
+            .map(|(_, r)| r.agent)
+            .collect();
+        agents.sort();
+        assert_eq!(agents, vec!["impl".to_string(), "plan".to_string()]);
+    }
+
+    #[test]
+    fn read_session_records_ignores_non_state_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_state_file(dir.path(), "impl.state", "impl");
+        fs::write(dir.path().join("watch.pid"), "12345").unwrap();
+
+        let records = read_session_records(dir.path());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].1.agent, "impl");
+    }
+
+    #[test]
+    fn read_session_records_skips_unparseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("corrupt.state"), "not a valid record").unwrap();
+        write_state_file(dir.path(), "impl.state", "impl");
+
+        let records = read_session_records(dir.path());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].1.agent, "impl");
+    }
+
+    #[test]
+    fn read_session_records_pairs_each_record_with_its_own_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_state_file(dir.path(), "impl.state", "impl");
+
+        let records = read_session_records(dir.path());
+        assert_eq!(
+            records,
+            vec![(path, read_record(&dir.path().join("impl.state")).unwrap())]
+        );
     }
 
     #[test]
