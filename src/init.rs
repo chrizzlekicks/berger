@@ -339,7 +339,11 @@ fn update_claude_settings(bergr_bin: &str) -> PathBuf {
             serde_json::from_str(&text),
             &format!("{} is not valid JSON", settings_path.display()),
         ),
-        Err(_) => Value::Object(serde_json::Map::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
+        Err(e) => exit_on_error(
+            Err::<Value, _>(e),
+            &format!("could not read {}", settings_path.display()),
+        ),
     };
 
     let backup_path = settings_path.with_extension("json.bergr-bak");

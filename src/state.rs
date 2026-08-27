@@ -132,15 +132,16 @@ pub fn cache_root() -> io::Result<PathBuf> {
     }
 
     let home = env::var_os("HOME")
-        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .filter(|home| home.has_root())
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "neither XDG_CACHE_HOME nor HOME is set",
+                "neither XDG_CACHE_HOME nor an absolute HOME is set",
             )
         })?;
 
-    Ok(PathBuf::from(home).join(".cache").join("bergr"))
+    Ok(home.join(".cache").join("bergr"))
 }
 
 pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
