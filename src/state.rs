@@ -115,20 +115,23 @@ fn parse_state(s: &str) -> Option<State> {
 /// fallback the amux prototype used. Errors if neither is set rather than silently
 /// resolving to a relative path.
 pub fn cache_root() -> io::Result<PathBuf> {
-    match env::var("XDG_CACHE_HOME") {
-        Ok(xdg) if Path::new(&xdg).is_absolute() => return Ok(PathBuf::from(xdg).join("bergr")),
-        _ => {}
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
+        let path = PathBuf::from(xdg);
+
+        if path.has_root() {
+            return Ok(path.join("bergr"));
+        }
     }
-    let not_set_err = || {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "neither XDG_CACHE_HOME nor HOME is set",
-        )
-    };
-    let home = env::var("HOME").map_err(|_| not_set_err())?;
-    if home.is_empty() {
-        return Err(not_set_err());
-    }
+
+    let home = env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "neither XDG_CACHE_HOME nor HOME is set",
+            )
+        })?;
+
     Ok(PathBuf::from(home).join(".cache").join("bergr"))
 }
 
