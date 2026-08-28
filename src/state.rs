@@ -1,0 +1,419 @@
+use crate::fs_util::{encode_path_component, encode_session_component};
+use std::env;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Working,
+    Approval,
+    Done,
+    Error,
+}
+
+impl State {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            State::Working => "",
+            State::Approval => "!",
+            State::Done => "\u{2713}",
+            State::Error => "\u{2717}",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Working => "working",
+            State::Approval => "approval",
+            State::Done => "done",
+            State::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Maps a hook event name to the state it represents, or `None` if the event should
+/// clear state entirely (`SessionEnd`) or is unrecognized.
+pub fn state_for_event(hook_event_name: &str) -> Option<State> {
+    match hook_event_name {
+        "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(State::Working),
+        "PermissionRequest" => Some(State::Approval),
+        "PostToolUseFailure" | "StopFailure" => Some(State::Error),
+        "Stop" => Some(State::Done),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateRecord {
+    pub agent: String,
+    pub state: State,
+    pub updated_at: String,
+    pub harness: String,
+    pub session: String,
+    pub window: String,
+    pub window_id: Option<String>,
+    pub server_pid: Option<String>,
+}
+
+impl StateRecord {
+    pub fn to_kv(&self) -> String {
+        let mut kv = format!(
+            "agent={}\nstate={}\nupdated_at={}\nharness={}\nsession={}\nwindow={}\n",
+            self.agent, self.state, self.updated_at, self.harness, self.session, self.window,
+        );
+        if let Some(id) = &self.window_id {
+            kv.push_str(&format!("window_id={id}\n"));
+        }
+        if let Some(pid) = &self.server_pid {
+            kv.push_str(&format!("server_pid={pid}\n"));
+        }
+        kv
+    }
+
+    pub fn from_kv(text: &str) -> Option<StateRecord> {
+        let mut agent = None;
+        let mut state = None;
+        let mut updated_at = None;
+        let mut harness = None;
+        let mut session = None;
+        let mut window = None;
+        let mut window_id = None;
+        let mut server_pid = None;
+
+        for line in text.lines() {
+            let (key, val) = line.split_once('=')?;
+            match key {
+                "agent" => agent = Some(val.to_string()),
+                "state" => state = Some(parse_state(val)?),
+                "updated_at" => updated_at = Some(val.to_string()),
+                "harness" => harness = Some(val.to_string()),
+                "session" => session = Some(val.to_string()),
+                "window" => window = Some(val.to_string()),
+                "window_id" => window_id = Some(val.to_string()),
+                "server_pid" => server_pid = Some(val.to_string()),
+                _ => {}
+            }
+        }
+
+        Some(StateRecord {
+            agent: agent?,
+            state: state?,
+            updated_at: updated_at?,
+            harness: harness.unwrap_or_default(),
+            session: session?,
+            window: window?,
+            window_id,
+            server_pid,
+        })
+    }
+}
+
+fn parse_state(s: &str) -> Option<State> {
+    match s {
+        "working" => Some(State::Working),
+        "approval" => Some(State::Approval),
+        "done" => Some(State::Done),
+        "error" => Some(State::Error),
+        _ => None,
+    }
+}
+
+/// `$XDG_CACHE_HOME`, defaulting to `$HOME/.cache` per the XDG base dir spec — same
+/// fallback the amux prototype used. Errors if neither is set rather than silently
+/// resolving to a relative path.
+pub fn cache_root() -> io::Result<PathBuf> {
+    if let Some(xdg) = env::var_os("XDG_CACHE_HOME") {
+        let path = PathBuf::from(xdg);
+
+        if path.has_root() {
+            return Ok(path.join("bergr"));
+        }
+    }
+
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.has_root())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "neither XDG_CACHE_HOME nor an absolute HOME is set",
+            )
+        })?;
+
+    Ok(home.join(".cache").join("bergr"))
+}
+
+pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
+    Ok(cache_root()?
+        .join(encode_session_component(session))
+        .join(format!("{}.state", encode_path_component(agent))))
+}
+
+pub fn read_record(path: &Path) -> Option<StateRecord> {
+    let text = fs::read_to_string(path).ok()?;
+    StateRecord::from_kv(&text)
+}
+
+/// Reads every `.state` file directly inside `dir`, paired with the path each was
+/// read from. A missing `dir` (no state recorded yet) yields an empty result, not an
+/// error — that's the expected state before any event has fired for a session. A
+/// file that fails to parse is skipped and logged, since a corrupt record is a real
+/// signal distinct from "not present".
+///
+/// Shared by `event`'s `SessionEnd` handling and `sync`'s reconciliation, so both
+/// agree on how a session's records are enumerated and paired with their paths.
+pub fn read_session_records(dir: &Path) -> Vec<(PathBuf, StateRecord)> {
+    let mut records = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return records,
+        Err(e) => {
+            eprintln!("bergr: cannot scan {}: {e}", dir.display());
+            return records;
+        }
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "state") {
+            continue;
+        }
+        match read_record(&path) {
+            Some(record) => records.push((path, record)),
+            None => eprintln!("bergr: could not parse {}", path.display()),
+        }
+    }
+    records
+}
+
+/// Deletes a state file, treating it already being gone as success rather than an
+/// error — both `event` (on `SessionEnd`) and `sync` prune state files, so either
+/// one may find the other already got there first.
+pub fn remove_state_file(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+
+    #[test]
+    fn remove_state_file_ignores_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.state");
+        assert!(remove_state_file(&path).is_ok());
+    }
+
+    fn write_state_file(dir: &Path, name: &str, agent: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(
+            &path,
+            format!(
+                "agent={agent}\nstate=working\nupdated_at=t\nharness=claude\nsession=s\nwindow={agent}\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn read_session_records_is_empty_for_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(read_session_records(&missing).is_empty());
+    }
+
+    #[test]
+    fn read_session_records_reads_every_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_state_file(dir.path(), "impl.state", "impl");
+        write_state_file(dir.path(), "plan.state", "plan");
+
+        let mut agents: Vec<_> = read_session_records(dir.path())
+            .into_iter()
+            .map(|(_, r)| r.agent)
+            .collect();
+        agents.sort();
+        assert_eq!(agents, vec!["impl".to_string(), "plan".to_string()]);
+    }
+
+    #[test]
+    fn read_session_records_ignores_non_state_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_state_file(dir.path(), "impl.state", "impl");
+        fs::write(dir.path().join("watch.pid"), "12345").unwrap();
+
+        let records = read_session_records(dir.path());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].1.agent, "impl");
+    }
+
+    #[test]
+    fn read_session_records_skips_unparseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("corrupt.state"), "not a valid record").unwrap();
+        write_state_file(dir.path(), "impl.state", "impl");
+
+        let records = read_session_records(dir.path());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].1.agent, "impl");
+    }
+
+    #[test]
+    fn read_session_records_pairs_each_record_with_its_own_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_state_file(dir.path(), "impl.state", "impl");
+
+        let records = read_session_records(dir.path());
+        assert_eq!(
+            records,
+            vec![(path, read_record(&dir.path().join("impl.state")).unwrap())]
+        );
+    }
+
+    #[test]
+    fn write_atomic_then_read_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("impl.state");
+        let record = StateRecord {
+            agent: "impl".to_string(),
+            state: State::Approval,
+            updated_at: "2026-08-19T12:00:00Z".to_string(),
+            harness: "claude".to_string(),
+            session: "myproject".to_string(),
+            window: "impl!".to_string(),
+            window_id: Some("@1".to_string()),
+            server_pid: Some("123".to_string()),
+        };
+        crate::fs_util::write_atomic(&path, &record.to_kv()).unwrap();
+        assert_eq!(read_record(&path), Some(record));
+    }
+
+    #[test]
+    fn read_record_missing_file_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.state");
+        assert_eq!(read_record(&path), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_map_to_expected_states() {
+        assert_eq!(state_for_event("SessionStart"), Some(State::Working));
+        assert_eq!(state_for_event("UserPromptSubmit"), Some(State::Working));
+        assert_eq!(state_for_event("PreToolUse"), Some(State::Working));
+        assert_eq!(state_for_event("PermissionRequest"), Some(State::Approval));
+        assert_eq!(state_for_event("PostToolUseFailure"), Some(State::Error));
+        assert_eq!(state_for_event("StopFailure"), Some(State::Error));
+        assert_eq!(state_for_event("Stop"), Some(State::Done));
+    }
+
+    #[test]
+    fn session_end_clears_state() {
+        assert_eq!(state_for_event("SessionEnd"), None);
+    }
+
+    #[test]
+    fn unknown_event_is_none() {
+        assert_eq!(state_for_event("SomethingNew"), None);
+    }
+
+    #[test]
+    fn working_has_no_symbol() {
+        assert_eq!(State::Working.symbol(), "");
+    }
+
+    #[test]
+    fn symbols_match_spec() {
+        assert_eq!(State::Approval.symbol(), "!");
+        assert_eq!(State::Done.symbol(), "\u{2713}");
+        assert_eq!(State::Error.symbol(), "\u{2717}");
+    }
+
+    #[test]
+    fn kv_round_trips() {
+        let record = StateRecord {
+            agent: "impl".to_string(),
+            state: State::Approval,
+            updated_at: "2026-08-19T12:00:00Z".to_string(),
+            harness: "claude".to_string(),
+            session: "myproject".to_string(),
+            window: "impl!".to_string(),
+            window_id: None,
+            server_pid: None,
+        };
+        let text = record.to_kv();
+        assert_eq!(StateRecord::from_kv(&text), Some(record));
+    }
+
+    #[test]
+    fn kv_missing_required_field_is_none() {
+        let text = "agent=impl\nstate=working\n";
+        assert_eq!(StateRecord::from_kv(text), None);
+    }
+
+    #[test]
+    fn kv_unknown_state_is_none() {
+        let text = "agent=impl\nstate=bogus\nupdated_at=t\nsession=s\nwindow=w\n";
+        assert_eq!(StateRecord::from_kv(text), None);
+    }
+
+    #[test]
+    fn kv_missing_harness_defaults_empty() {
+        let text = "agent=impl\nstate=working\nupdated_at=t\nsession=s\nwindow=w\n";
+        let record = StateRecord::from_kv(text).unwrap();
+        assert_eq!(record.harness, "");
+    }
+
+    #[test]
+    fn state_path_has_single_filename_component_for_agent_with_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().to_path_buf();
+        let path = cache_root
+            .join("session")
+            .join(format!("{}.state", encode_path_component("feature/foo")));
+        assert_eq!(path.parent().unwrap(), cache_root.join("session"));
+        assert_eq!(path.file_name().unwrap(), "feature%2ffoo.state");
+    }
+
+    #[test]
+    fn state_path_keeps_leading_slash_session_inside_cache_root() {
+        let session = "/workspace/project";
+        let path = state_path(session, "impl").unwrap();
+        let cache_root = cache_root().unwrap();
+        assert!(path.starts_with(&cache_root));
+        assert_eq!(
+            path,
+            cache_root
+                .join(encode_session_component(session))
+                .join("impl.state")
+        );
+    }
+
+    #[test]
+    fn state_path_preserves_session_case_but_not_agent_case() {
+        let foo = state_path("Foo", "impl").unwrap();
+        let foo_lower = state_path("foo", "impl").unwrap();
+        assert_ne!(foo.parent(), foo_lower.parent());
+
+        let upper_agent = state_path("s", "Impl").unwrap();
+        let lower_agent = state_path("s", "impl").unwrap();
+        assert_eq!(upper_agent, lower_agent);
+    }
+}

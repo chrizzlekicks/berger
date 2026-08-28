@@ -1,56 +1,55 @@
-# amux
+# bergr
 
-tmux agent status helper for Claude Code.
+Make tmux sessions agent-aware from Claude Code lifecycle hooks.
 
-Claude Code hooks write state files; `amux watch` reads them and renames tmux
-windows to show each agent's current status as a suffix.
+Claude Code hooks call `bergr event`, which writes a state file and renames the
+current tmux window to show the agent's status as a suffix — no background
+process involved.
 
 ```
-1:main  2:plan…  3:impl!  4:review✓  5:tests✗
+1:main  2:plan  3:impl!  4:review✓  5:tests✗
 ```
 
 ## Symbols
 
-| State    | Symbol | Meaning              |
-|----------|--------|----------------------|
+| State    | Symbol | Meaning                |
+|----------|--------|------------------------|
 | working  | _(none)_ | Busy, no action needed |
-| approval | !      | Needs your input     |
-| done     | ✓      | Session finished     |
-| error    | ✗      | Hook / tool error    |
+| approval | `!`    | Needs your input        |
+| done     | `✓`    | Session finished        |
+| error    | `✗`    | Hook / tool error       |
 
 ## Quick start
 
-### 1. Make sure amux is on your PATH
+```bash
+cargo install --path . --root ~/.local
+bergr init
+```
 
-`amux` is installed at `~/.local/bin/amux`. Verify:
+`init` wires everything up:
+
+- Rewrites `~/.claude/settings.json` so all 8 lifecycle hooks call `bergr event`,
+  leaving unrelated hooks untouched. Re-running `init` is idempotent.
+- Writes `~/.config/bergr/tmux.conf` (bergr's own settings — `allow-rename off`,
+  `automatic-rename off`, and a `prefix + M` binding that runs `bergr sync`).
+  Prints the one line to add to your `~/.tmux.conf`:
+
+  ```tmux
+  source-file ~/.config/bergr/tmux.conf
+  ```
+
+- Creates the state cache root.
+
+Then name your tmux windows to match agent roles:
 
 ```bash
-which amux   # should print ~/.local/bin/amux
-amux --help
+tmux rename-window impl
+tmux rename-window plan
 ```
 
-### 2. Add tmux settings
+When Claude Code runs in one of these windows, the suffix updates as hooks fire.
 
-Add to `~/.tmux.conf`:
-
-```tmux
-set -g allow-rename off
-set -g automatic-rename off
-
-bind-key M run-shell "amux watch --session #{session_name} >/tmp/amux-#{session_name}.log 2>&1 &"
-```
-
-Or source the provided snippet:
-
-```tmux
-source-file ~/.config/amux/tmux.conf
-```
-
-### 3. Claude Code hooks
-
-The hooks are already wired in `~/.claude/settings.json`. On `SessionStart`,
-the watcher is started automatically and the state is set to `working`. No need
-to press `prefix + M` manually.
+## Event → state mapping
 
 | Event | State | Symbol |
 |---|---|---|
@@ -61,61 +60,37 @@ to press `prefix + M` manually.
 | `PostToolUseFailure` | `error` | `✗` |
 | `Stop` | `done` | `✓` |
 | `StopFailure` | `error` | `✗` |
-| `SessionEnd` | _(state file deleted)_ | _(none)_ |
+| `SessionEnd` | _(state file deleted)_ | _(suffix cleared)_ |
 
-The agent name defaults to `$AMUX_AGENT` if set, otherwise `basename $PWD`.
-Name your tmux windows to match your project directories (or set `AMUX_AGENT`
-in the shell where you launch `claude`).
+`bergr event` never exits non-zero — it sits on Claude Code's hook path, where a
+failing exit code can block a tool call or prompt, so a bergr bug must never be
+able to interfere with your session. Errors go to stderr; the event is a no-op.
 
-### 4. Start a session
-
-```bash
-# Start a new tmux session for your project
-tmux new-session -d -s myproject -c ~/code/myproject
-
-# Start the watcher in the background
-amux watch --session myproject &
-
-# Attach
-tmux attach -t myproject
-```
-
-Or press `prefix + M` inside tmux to start the watcher for the current session.
-
-### 5. Name your windows to match agent roles
-
-```bash
-# Inside tmux:
-tmux rename-window impl
-tmux rename-window plan
-# etc.
-```
-
-When Claude Code runs inside one of these windows, the suffix updates
-automatically.
+Running outside tmux (a plain terminal, an IDE, CI) is a normal condition, not an
+error — `event` returns without doing anything tmux-related.
 
 ## Manual usage
 
 ```bash
-# Mark an agent state manually (useful for testing)
-amux mark --agent impl --state working --session myproject
-amux mark --agent impl --state approval --session myproject
-amux mark --agent impl --state done --session myproject
+# Reconcile every window in a session against its state files — useful if a
+# rename was missed or a window name drifted. Bound to prefix + M by init.
+bergr sync --session myproject
 
-# Show current state for all agents in a session
-amux status --session myproject
-
-# Start the watcher (idempotent — safe to run multiple times)
-amux watch --session myproject
+# Clear all runtime state (bergr's own cache, plus any leftover amux cache)
+bergr reset
 ```
+
+There is no `watch`/daemon: state only changes when a hook fires, so `event`
+renames the window in the same invocation. `sync` is the on-demand repair path
+for anything that falls out of sync in between.
 
 ## Per-window agent name
 
-Set `AMUX_AGENT` in the shell where you run `claude` to override the default
-(basename of `$PWD`):
+Agent name is resolved from the current tmux window name (suffix stripped), or
+`$BERGR_AGENT` if set, or `basename $PWD` as a last resort:
 
 ```bash
-export AMUX_AGENT=impl
+export BERGR_AGENT=impl
 claude
 ```
 
@@ -123,30 +98,42 @@ claude
 
 | What | Path |
 |---|---|
-| Binary | `~/.local/bin/amux` |
-| tmux config | `~/.config/tmux/tmux.conf` (amux lines at the bottom) |
+| Binary | `~/.local/bin/bergr` |
+| tmux config | `~/.config/bergr/tmux.conf` (sourced from your `~/.tmux.conf`) |
 | Claude Code hooks | `~/.claude/settings.json` |
-| State files | `~/.cache/amux/<session>/<agent>.state` |
-| Watcher logs | `/tmp/amux-<session>.log` |
+| State files | `$XDG_CACHE_HOME/bergr/<session>/<agent>.state` (default `~/.cache/bergr/...`) |
 
 ## Architecture
 
-```
-Claude Code hooks
-  -> amux mark           (writes state file, never touches tmux)
-  -> ~/.cache/amux/<session>/<agent>.state
+```mermaid
+flowchart LR
+    hook["Claude Code hook\n(any of 8 events)"] -->|stdin JSON| event["bergr event"]
+    event -->|"atomic write\n(tmpfile + rename)"| state[("state file\n<session>/<agent>.state")]
+    event -->|rename-window| tmux(("tmux window\n<agent><symbol>"))
 
-amux watch               (reads state files every 2s, started by SessionStart hook)
-  -> tmux rename-window  (appends symbol, strips old suffix first)
+    sync["bergr sync --session <name>\n(run on demand)"] -->|reads all| state
+    sync -->|rename-window| tmux
 ```
+
+`bergr event` is short-lived: read stdin, write state, exit — nothing stays running
+between hooks. `bergr sync` reads every state file for a session and reconciles any
+window that has drifted; run it manually, or bind it to a tmux key (`init` does this
+by default).
 
 State files are plain key=value text — no JSON, no jq required.
 
 ## Troubleshooting
 
 - **Window names not updating**: check that `allow-rename off` and
-  `automatic-rename off` are set in tmux.
-- **Multiple watchers**: `amux watch` is idempotent per session — a second
-  invocation exits immediately if a watcher is already running.
-- **Watcher log**: `cat /tmp/amux-<session>.log`
-- **State files**: `ls ~/.cache/amux/<session>/`
+  `automatic-rename off` are set (via `~/.config/bergr/tmux.conf`, sourced from
+  your `~/.tmux.conf`).
+- **A name looks stale**: run `bergr sync --session <name>` to reconcile.
+- **State files**: `ls $XDG_CACHE_HOME/bergr/<session>/` (default
+  `~/.cache/bergr/<session>/`).
+
+## Migrating from amux
+
+Superseded by bergr; the original bash prototype is kept in `legacy/` for
+reference. If an `amux watch` process is still running from before, `bergr
+init` will warn and print the command to kill it — a live watcher would
+otherwise keep fighting bergr's renames.
