@@ -285,6 +285,7 @@ class SmokeInit(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = sb.home
         env["XDG_CACHE_HOME"] = sb.xdg_cache
+        env.pop("XDG_CONFIG_HOME", None)
         return subprocess.run([bergr_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
 
     def test_migrates_amux_hooks_and_keeps_unrelated_ones(self):
@@ -311,7 +312,7 @@ class SmokeInit(unittest.TestCase):
                     any("amux" in c for c in commands),
                     f"amux entry survived in {event}: {commands}",
                 )
-                bergr_entries = [c for c in commands if c.endswith("bergr event") or "bergr event" in c]
+                bergr_entries = [c for c in commands if c.endswith(" event") and "bergr" in c]
                 self.assertEqual(len(bergr_entries), 1, f"{event}: {commands}")
 
             pre_tool_use_cmds = [
@@ -375,7 +376,7 @@ class SmokeInit(unittest.TestCase):
             self.assertIn("allow-rename off", conf)
             self.assertIn("automatic-rename off", conf)
             self.assertIn("bind-key M", conf)
-            self.assertIn(f"{bergr_bin} sync --session", conf)
+            self.assertIn(f"'{bergr_bin}' sync --session", conf)
 
     def test_init_without_preexisting_settings_still_succeeds(self):
         with TmuxSandbox() as sb:
@@ -520,6 +521,191 @@ class SmokeConcurrency(unittest.TestCase):
             self.assertTrue(sb.wait_for_state("prj", "plan"))
             self.assertEqual(sb.state("prj", "impl")["agent"], "impl")
             self.assertEqual(sb.state("prj", "plan")["agent"], "plan")
+
+
+# ---------------------------------------------------------------------------
+# J. CLI surface (main.rs)
+# ---------------------------------------------------------------------------
+
+class SmokeCli(unittest.TestCase):
+    def test_bare_command_exits_1_with_usage(self):
+        with TmuxSandbox() as sb:
+            r = sb.run_bergr()
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("usage: bergr", r.stderr)
+
+    def test_unknown_subcommand_exits_1(self):
+        with TmuxSandbox() as sb:
+            r = sb.run_bergr("frobnicate")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("unknown command 'frobnicate'", r.stderr)
+            self.assertIn("usage: bergr", r.stderr)
+
+    def test_sync_unknown_flag_exits_1(self):
+        with TmuxSandbox() as sb:
+            r = sb.run_bergr("sync", "--session", "prj", "--force")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("unknown argument '--force'", r.stderr)
+
+    def test_sync_session_flag_with_no_value_exits_1(self):
+        with TmuxSandbox() as sb:
+            r = sb.run_bergr("sync", "--session")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("--session <name> is required", r.stderr)
+
+
+# ---------------------------------------------------------------------------
+# K. Suffix transitions and repeated states
+# ---------------------------------------------------------------------------
+
+class SmokeSuffixTransitions(unittest.TestCase):
+    def test_working_state_strips_existing_suffix(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.event(hook_payload("Stop"), session="prj", window="impl")
+            self.assertTrue(sb.wait_for_window("prj", "impl✓"))
+            sb.event(hook_payload("PreToolUse"), session="prj", window="impl✓")
+            self.assertTrue(sb.wait_for_window("prj", "impl"))
+
+    def test_repeated_error_events_do_not_stack_suffix(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.event(hook_payload("PostToolUseFailure"), session="prj", window="impl")
+            self.assertTrue(sb.wait_for_window("prj", "impl✗"))
+            sb.event(hook_payload("StopFailure"), session="prj", window="impl✗")
+            self.assertTrue(sb.wait_for_window("prj", "impl✗"))
+            self.assertEqual(sb.windows("prj"), ["impl✗"])
+
+    def test_agent_name_of_only_suffix_chars_renames_to_empty(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "somewindow")
+            sb.event(hook_payload("Stop"), session="prj", window="somewindow", agent="!!!")
+            self.assertTrue(sb.wait_for_state("prj", ""))
+            self.assertTrue(sb.wait_for_window("prj", "✓"))
+
+
+# ---------------------------------------------------------------------------
+# L. Agent switching on a single window (state-file identity)
+# ---------------------------------------------------------------------------
+
+class SmokeAgentSwitch(unittest.TestCase):
+    def test_switching_agent_on_same_window_removes_old_state_file(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "somewindow")
+            sb.event(hook_payload("Stop"), session="prj", window="somewindow", agent="alpha")
+            self.assertTrue(sb.wait_for_state("prj", "alpha"))
+            sb.event(hook_payload("Stop"), session="prj", window="somewindow", agent="beta")
+            self.assertTrue(sb.wait_for_state("prj", "beta"))
+            self.assertTrue(sb.wait_for_no_state("prj", "alpha"))
+
+    def test_agent_name_with_slash_is_encoded_to_single_path_component(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.event(hook_payload("Stop"), session="prj", window="impl", agent="feature/foo")
+            state_dir = os.path.join(sb.xdg_cache, "bergr", "prj")
+            self.assertTrue(sb.wait_for(lambda: os.path.isdir(state_dir)))
+            self.assertEqual(os.listdir(state_dir), ["feature%2ffoo.state"])
+
+
+# ---------------------------------------------------------------------------
+# M. sync: multi-window repair and orphan pruning
+# ---------------------------------------------------------------------------
+
+class SmokeSyncRepair(unittest.TestCase):
+    def test_sync_repairs_multiple_mangled_windows_at_once(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.new_window("prj", "plan")
+            sb.event(hook_payload("Stop"), session="prj", window="impl")
+            sb.event(hook_payload("PermissionRequest"), session="prj", window="plan")
+            sb.wait_for_window("prj", "impl✓")
+            sb.wait_for_window("prj", "plan!")
+            sb.rename_window("prj", "impl✓", "impl")
+            sb.rename_window("prj", "plan!", "plan")
+            r = sb.run_bergr("sync", "--session", "prj")
+            self.assertEqual(r.returncode, 0)
+            self.assertEqual(set(sb.windows("prj")), {"impl✓", "plan!"})
+
+    def test_sync_prunes_state_for_a_closed_window(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.new_window("prj", "plan")
+            sb.event(hook_payload("Stop"), session="prj", window="plan", agent="plan")
+            self.assertTrue(sb.wait_for_state("prj", "plan"))
+            _real_tmux_kill_window(sb, "prj", "plan")
+            r = sb.run_bergr("sync", "--session", "prj")
+            self.assertEqual(r.returncode, 0)
+            self.assertTrue(sb.wait_for_no_state("prj", "plan"))
+
+
+def _real_tmux_kill_window(sb, session, window):
+    from harness.sandbox import _real_tmux
+    _real_tmux("-L", sb.socket, "kill-window", "-t", f"{session}:{window}")
+
+
+# ---------------------------------------------------------------------------
+# N. init: legacy amux ~/.tmux.conf source-line removal
+# ---------------------------------------------------------------------------
+
+class SmokeInitTmuxConfMigration(unittest.TestCase):
+    def _run_init(self, sb, bergr_bin):
+        env = dict(os.environ)
+        env["HOME"] = sb.home
+        env["XDG_CACHE_HOME"] = sb.xdg_cache
+        env.pop("XDG_CONFIG_HOME", None)
+        return subprocess.run([bergr_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
+
+    def test_removes_stale_amux_source_line_from_user_tmux_conf(self):
+        with TmuxSandbox() as sb:
+            os.makedirs(os.path.join(sb.home, ".claude"), exist_ok=True)
+            amux_conf = os.path.join(sb.home, ".config", "amux", "tmux.conf")
+            user_conf = os.path.join(sb.home, ".tmux.conf")
+            with open(user_conf, "w") as f:
+                f.write(f'set -g mouse on\nsource-file "{amux_conf}"\nset -g history-limit 5000\n')
+            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+
+            r = self._run_init(sb, bergr_bin)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+            with open(user_conf) as f:
+                contents = f.read()
+            self.assertNotIn("amux", contents)
+            self.assertIn("history-limit 5000", contents)
+
+            backup_path = user_conf[: -len(".conf")] + ".conf.bergr-bak"
+            self.assertTrue(os.path.exists(backup_path))
+
+    def test_leaves_user_tmux_conf_untouched_when_not_sourcing_amux(self):
+        with TmuxSandbox() as sb:
+            os.makedirs(os.path.join(sb.home, ".claude"), exist_ok=True)
+            user_conf = os.path.join(sb.home, ".tmux.conf")
+            with open(user_conf, "w") as f:
+                f.write("set -g mouse on\n")
+            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+
+            r = self._run_init(sb, bergr_bin)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+            with open(user_conf) as f:
+                self.assertEqual(f.read(), "set -g mouse on\n")
+            backup_path = user_conf[: -len(".conf")] + ".conf.bergr-bak"
+            self.assertFalse(os.path.exists(backup_path))
+
+
+# ---------------------------------------------------------------------------
+# O. reset: legacy amux cache removal
+# ---------------------------------------------------------------------------
+
+class SmokeResetLegacy(unittest.TestCase):
+    def test_reset_removes_legacy_amux_cache_root(self):
+        with TmuxSandbox() as sb:
+            amux_cache = os.path.join(sb.xdg_cache, "amux")
+            os.makedirs(os.path.join(amux_cache, "prj"), exist_ok=True)
+            with open(os.path.join(amux_cache, "prj", "watch.pid"), "w") as f:
+                f.write("12345")
+            r = sb.run_bergr("reset")
+            self.assertEqual(r.returncode, 0)
+            self.assertFalse(os.path.exists(amux_cache))
 
 
 if __name__ == "__main__":

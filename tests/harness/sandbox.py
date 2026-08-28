@@ -150,9 +150,16 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         """Build a `KEY=val ` prefix string for an in-shell command. The tmux
         server snapshots env at new-session time, so every run-shell command
         must set what it needs explicitly rather than relying on that snapshot."""
-        env = {"HOME": self.home, "XDG_CACHE_HOME": self.xdg_cache, "PATH": f"{self._shim_dir}:{os.environ.get('PATH', '')}"}
+        env = {
+            "HOME": self.home,
+            "XDG_CACHE_HOME": self.xdg_cache,
+            "PATH": f"{self._shim_dir}:{os.environ.get('PATH', '')}",
+        }
         env.update(extra_env or {})
-        return " ".join(f"{k}={_sh_quote(v)}" for k, v in env.items())
+        assignments = " ".join(f"{k}={_sh_quote(v)}" for k, v in env.items())
+        # A dev's own shell may export XDG_CONFIG_HOME; that must not leak into
+        # bergr's config-dir resolution inside the sandbox.
+        return f"XDG_CONFIG_HOME= {assignments}"
 
     def event(self, payload_json, *, session, window, agent=None, timeout=5.0):
         """Run `bergr event` inside a run-shell targeted at session:window, so
@@ -217,6 +224,7 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         env = dict(os.environ)
         env["HOME"] = self.home
         env["XDG_CACHE_HOME"] = self.xdg_cache
+        env.pop("XDG_CONFIG_HOME", None)
         env["PATH"] = f"{self._shim_dir}:{env.get('PATH', '')}"
         return subprocess.run(
             [BERGR_BIN, *args],
