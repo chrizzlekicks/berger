@@ -72,6 +72,22 @@ pub fn current_window_id() -> Option<String> {
     if id.is_empty() { None } else { Some(id) }
 }
 
+/// The tmux server's own PID, stable for the server's lifetime and distinct
+/// across restarts — unlike `window_id` (`@N`), which a fresh server hands out
+/// starting from `@0` again, so the same id can mean a different window after a
+/// reboot or `tmux kill-server`.
+pub fn server_pid() -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "#{pid}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let pid = strip_line_ending(String::from_utf8(out.stdout).ok()?);
+    if pid.is_empty() { None } else { Some(pid) }
+}
+
 fn list_windows_args(session: &str) -> Vec<String> {
     vec![
         "list-windows".to_string(),

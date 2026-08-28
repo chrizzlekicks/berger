@@ -25,18 +25,13 @@ pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-/// Encodes `component` into a single safe path component: a leading `/` would
+/// Escapes `component` into a single safe path component: a leading `/` would
 /// otherwise make `PathBuf::join` discard everything joined so far (letting a
 /// session or agent name escape the cache root entirely), and unescaped `/`
 /// or `\` would nest the result under an extra directory level. Escaping is
 /// injective (each byte maps to exactly one output), so two distinct inputs
 /// (e.g. `feature/foo` and `feature_foo`) can never collide on the same path.
-///
-/// Lowercased by design: bergr treats agent and session names as case-insensitive
-/// everywhere, not just on case-folding filesystems, so `Impl` and `impl` always
-/// share one state file rather than colliding only on some hosts (e.g. default
-/// macOS volumes) and not others.
-pub fn encode_path_component(component: &str) -> String {
+fn escape_path_component(component: &str) -> String {
     let mut encoded = String::with_capacity(component.len());
     for b in component.bytes() {
         match b {
@@ -44,7 +39,23 @@ pub fn encode_path_component(component: &str) -> String {
             _ => encoded.push(b as char),
         }
     }
-    encoded.to_lowercase()
+    encoded
+}
+
+/// Escapes and lowercases `component`. Used for the agent name: bergr treats
+/// agent names as case-insensitive everywhere, not just on case-folding
+/// filesystems, so `Impl` and `impl` always share one state file rather than
+/// colliding only on some hosts (e.g. default macOS volumes) and not others.
+pub fn encode_path_component(component: &str) -> String {
+    escape_path_component(component).to_lowercase()
+}
+
+/// Escapes `component` without folding case. Used for the tmux session name:
+/// unlike agent names, two live tmux sessions differing only by case (`Foo` and
+/// `foo`) are genuinely distinct sessions, so their state must not share a
+/// directory.
+pub fn encode_session_component(component: &str) -> String {
+    escape_path_component(component)
 }
 
 #[cfg(test)]

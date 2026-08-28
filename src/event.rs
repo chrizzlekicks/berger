@@ -1,5 +1,5 @@
 use crate::fs_util;
-use crate::fs_util::encode_path_component;
+use crate::fs_util::encode_session_component;
 use crate::hook::HookPayload;
 use crate::name::strip_suffix;
 use crate::reconcile::window_matches_record;
@@ -116,6 +116,7 @@ pub fn run() {
                 session: session.clone(),
                 window: new_name.clone(),
                 window_id: tmux::current_window_id(),
+                server_pid: tmux::server_pid(),
             };
             if let Err(e) = fs_util::write_atomic(&path, &record.to_kv()) {
                 eprintln!("bergr event: failed writing {}: {e}", path.display());
@@ -145,15 +146,19 @@ fn current_window() -> Option<Window> {
 fn find_record_path_for_window(session: &str, window: &Window) -> Option<PathBuf> {
     let dir = state::cache_root()
         .ok()?
-        .join(encode_path_component(session));
-    find_record_path_in_dir(&dir, window)
+        .join(encode_session_component(session));
+    find_record_path_in_dir(&dir, window, tmux::server_pid().as_deref())
 }
 
 /// Session-dir-taking core of `find_record_path_for_window`, split out so tests can
 /// point it at a temp dir instead of the real cache root.
-fn find_record_path_in_dir(dir: &Path, window: &Window) -> Option<PathBuf> {
+fn find_record_path_in_dir(
+    dir: &Path,
+    window: &Window,
+    current_server_pid: Option<&str>,
+) -> Option<PathBuf> {
     for (path, record) in state::read_session_records(dir) {
-        if window_matches_record(window, &record) {
+        if window_matches_record(window, &record, current_server_pid) {
             return Some(path);
         }
     }
@@ -170,14 +175,19 @@ fn remove_stale_record_for_window(session: &str, window: &Window, new_path: &Pat
     let Ok(root) = state::cache_root() else {
         return;
     };
-    let dir = root.join(encode_path_component(session));
-    remove_stale_record_in_dir(&dir, window, new_path);
+    let dir = root.join(encode_session_component(session));
+    remove_stale_record_in_dir(&dir, window, new_path, tmux::server_pid().as_deref());
 }
 
 /// Dir-taking core of `remove_stale_record_for_window`, split out so tests can point
 /// it at a temp dir instead of the real cache root.
-fn remove_stale_record_in_dir(dir: &Path, window: &Window, new_path: &Path) {
-    let Some(old_path) = find_record_path_in_dir(dir, window) else {
+fn remove_stale_record_in_dir(
+    dir: &Path,
+    window: &Window,
+    new_path: &Path,
+    current_server_pid: Option<&str>,
+) {
+    let Some(old_path) = find_record_path_in_dir(dir, window, current_server_pid) else {
         return;
     };
     if old_path == new_path {
@@ -233,6 +243,7 @@ mod tests {
             session: "s".to_string(),
             window: agent.to_string(),
             window_id: Some(window_id.to_string()),
+            server_pid: None,
         }
     }
 
@@ -248,7 +259,7 @@ mod tests {
             index: "1".to_string(),
             name: "b".to_string(),
         };
-        remove_stale_record_in_dir(dir.path(), &window, &new_path);
+        remove_stale_record_in_dir(dir.path(), &window, &new_path, None);
         fs_util::write_atomic(&new_path, &record("b", "@1").to_kv()).unwrap();
 
         assert!(!old_path.exists());
@@ -266,7 +277,7 @@ mod tests {
             index: "1".to_string(),
             name: "a".to_string(),
         };
-        remove_stale_record_in_dir(dir.path(), &window, &path);
+        remove_stale_record_in_dir(dir.path(), &window, &path, None);
 
         assert!(path.exists());
     }
@@ -282,7 +293,7 @@ mod tests {
             index: "1".to_string(),
             name: "b".to_string(),
         };
-        remove_stale_record_in_dir(dir.path(), &window, &dir.path().join("b.state"));
+        remove_stale_record_in_dir(dir.path(), &window, &dir.path().join("b.state"), None);
 
         assert!(unrelated.exists());
     }

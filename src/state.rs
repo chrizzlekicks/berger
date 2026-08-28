@@ -1,4 +1,4 @@
-use crate::fs_util::encode_path_component;
+use crate::fs_util::{encode_path_component, encode_session_component};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -60,6 +60,7 @@ pub struct StateRecord {
     pub session: String,
     pub window: String,
     pub window_id: Option<String>,
+    pub server_pid: Option<String>,
 }
 
 impl StateRecord {
@@ -70,6 +71,9 @@ impl StateRecord {
         );
         if let Some(id) = &self.window_id {
             kv.push_str(&format!("window_id={id}\n"));
+        }
+        if let Some(pid) = &self.server_pid {
+            kv.push_str(&format!("server_pid={pid}\n"));
         }
         kv
     }
@@ -82,6 +86,7 @@ impl StateRecord {
         let mut session = None;
         let mut window = None;
         let mut window_id = None;
+        let mut server_pid = None;
 
         for line in text.lines() {
             let (key, val) = line.split_once('=')?;
@@ -93,6 +98,7 @@ impl StateRecord {
                 "session" => session = Some(val.to_string()),
                 "window" => window = Some(val.to_string()),
                 "window_id" => window_id = Some(val.to_string()),
+                "server_pid" => server_pid = Some(val.to_string()),
                 _ => {}
             }
         }
@@ -105,6 +111,7 @@ impl StateRecord {
             session: session?,
             window: window?,
             window_id,
+            server_pid,
         })
     }
 }
@@ -146,7 +153,7 @@ pub fn cache_root() -> io::Result<PathBuf> {
 
 pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
     Ok(cache_root()?
-        .join(encode_path_component(session))
+        .join(encode_session_component(session))
         .join(format!("{}.state", encode_path_component(agent))))
 }
 
@@ -288,6 +295,7 @@ mod io_tests {
             session: "myproject".to_string(),
             window: "impl!".to_string(),
             window_id: Some("@1".to_string()),
+            server_pid: Some("123".to_string()),
         };
         crate::fs_util::write_atomic(&path, &record.to_kv()).unwrap();
         assert_eq!(read_record(&path), Some(record));
@@ -348,6 +356,7 @@ mod tests {
             session: "myproject".to_string(),
             window: "impl!".to_string(),
             window_id: None,
+            server_pid: None,
         };
         let text = record.to_kv();
         assert_eq!(StateRecord::from_kv(&text), Some(record));
@@ -392,8 +401,19 @@ mod tests {
         assert_eq!(
             path,
             cache_root
-                .join(encode_path_component(session))
+                .join(encode_session_component(session))
                 .join("impl.state")
         );
+    }
+
+    #[test]
+    fn state_path_preserves_session_case_but_not_agent_case() {
+        let foo = state_path("Foo", "impl").unwrap();
+        let foo_lower = state_path("foo", "impl").unwrap();
+        assert_ne!(foo.parent(), foo_lower.parent());
+
+        let upper_agent = state_path("s", "Impl").unwrap();
+        let lower_agent = state_path("s", "impl").unwrap();
+        assert_eq!(upper_agent, lower_agent);
     }
 }
