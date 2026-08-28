@@ -15,14 +15,14 @@ use std::process::Command;
 ///
 /// Not unit-tested — every branch depends on process-global state that isn't
 /// injectable/mockable here. `strip_suffix` is covered separately in `name.rs`.
-fn resolve_agent() -> String {
+fn resolve_agent(window_name: Option<&str>) -> String {
     if let Ok(a) = env::var("BERGR_AGENT")
         && !a.is_empty()
     {
         return strip_suffix(&a);
     }
-    if let Some(window) = tmux::current_window_name() {
-        return strip_suffix(&window);
+    if let Some(name) = window_name {
+        return strip_suffix(name);
     }
     match env::current_dir() {
         Ok(p) => match p.file_name() {
@@ -58,7 +58,29 @@ pub fn run() {
         // error. Nothing to update.
         return;
     };
-    let agent = resolve_agent();
+    // Read once, up front, and reuse everywhere below (agent resolution, stale-
+    // record lookup, rename target) — a second concurrent `bergr event` can
+    // change the server's active window at any moment, so separate ambient
+    // reads (each its own ad hoc `tmux display-message`) can each resolve to a
+    // *different* window than the others, mixing one invocation's agent name
+    // with another's window id.
+    let window = current_window();
+    // `current_window()` requires id, index, and name to all succeed — but
+    // index is irrelevant to agent resolution (rename now targets `id`, not
+    // index). Falling back to a fresh name-only read here, rather than
+    // letting an index-read failure veto agent resolution too, only matters
+    // on that already-degraded path: it can't reopen the race in the common
+    // case where `current_window()` succeeds.
+    let fallback_name = if window.is_none() {
+        tmux::current_window_name()
+    } else {
+        None
+    };
+    let window_name = window
+        .as_ref()
+        .map(|w| w.name.as_str())
+        .or(fallback_name.as_deref());
+    let agent = resolve_agent(window_name);
 
     match state::state_for_event(&payload.hook_event_name) {
         None => {
@@ -80,7 +102,7 @@ pub fn run() {
             // `current_session()`), this skips the rename too rather than falling
             // back to `agent`: a stale suffix left behind here is recoverable via
             // `bergr sync`, but renaming to a fabricated name would not be.
-            let Some(window) = current_window() else {
+            let Some(window) = window else {
                 return;
             };
             let base = strip_suffix(&window.name);
@@ -94,7 +116,7 @@ pub fn run() {
                 eprintln!("bergr event: failed deleting {}: {e}", path.display());
                 return;
             }
-            rename_current_window(&session, &base);
+            rename_current_window(&window.id, &base);
         }
         Some(new_state) => {
             let path = match state::state_path(&session, &agent) {
@@ -104,8 +126,8 @@ pub fn run() {
                     return;
                 }
             };
-            if let Some(window) = current_window() {
-                remove_stale_record_for_window(&session, &window, &path);
+            if let Some(w) = &window {
+                remove_stale_record_for_window(&session, w, &path);
             }
             let new_name = format!("{agent}{}", new_state.symbol());
             let record = StateRecord {
@@ -115,14 +137,16 @@ pub fn run() {
                 harness: "claude".to_string(),
                 session: session.clone(),
                 window: new_name.clone(),
-                window_id: tmux::current_window_id(),
+                window_id: window.as_ref().map(|w| w.id.clone()),
                 server_pid: tmux::server_pid(),
             };
             if let Err(e) = fs_util::write_atomic(&path, &record.to_kv()) {
                 eprintln!("bergr event: failed writing {}: {e}", path.display());
                 return;
             }
-            rename_current_window(&session, &new_name);
+            if let Some(w) = &window {
+                rename_current_window(&w.id, &new_name);
+            }
         }
     }
 }
@@ -198,14 +222,14 @@ fn remove_stale_record_in_dir(
     }
 }
 
-/// Renames the current window by its live index, not by matching `agent` against
-/// window names — that breaks when `BERGR_AGENT` diverges from the window name.
-fn rename_current_window(session: &str, new_name: &str) {
-    let Some(index) = tmux::current_window_index() else {
-        return;
-    };
-    if !tmux::rename_window(session, &index, new_name) {
-        eprintln!("bergr event: failed to rename window {index} to '{new_name}'");
+/// Renames `window` by its stable id, not by matching `agent` against window
+/// names (breaks when `BERGR_AGENT` diverges from the window name) and not by
+/// re-querying the live index (races: the active window can change between
+/// the caller's earlier lookup and a fresh index query here, renaming whatever
+/// window happens to be active at that later moment instead of `window`).
+fn rename_current_window(window_id: &str, new_name: &str) {
+    if !tmux::rename_window_by_id(window_id, new_name) {
+        eprintln!("bergr event: failed to rename window {window_id} to '{new_name}'");
     }
 }
 

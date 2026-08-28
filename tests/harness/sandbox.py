@@ -192,9 +192,15 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         tmp_path = out_path + ".part"
         extra = {"BERGR_AGENT": agent} if agent is not None else {}
         prefix = self._env_prefix(extra)
-        payload_for_printf = payload_json.replace("\\", "\\\\").replace('"', '\\"')
+        # Payload goes into its own file rather than interpolated inline --
+        # embedding it inside a double-quoted shell string only escapes `\`
+        # and `"`; `$(...)`, backticks, and `$VAR` in the payload would still
+        # be expanded by the inner `sh -c` before bergr ever sees stdin.
+        payload_path = os.path.join(self._tmpdir, f"payload-{next(_socket_counter)}.json")
+        with open(payload_path, "w") as f:
+            f.write(payload_json)
         inner = (
-            f"printf \"%s\" \"{payload_for_printf}\" | "
+            f"cat {_sh_quote(payload_path)} | "
             f"{prefix} {_sh_quote(BERGR_BIN)} event >{_sh_quote(tmp_path)} 2>&1; "
             f"printf \"\\n__EXIT__:%s\\n\" \"$?\" >>{_sh_quote(tmp_path)}; "
             f"mv {_sh_quote(tmp_path)} {_sh_quote(out_path)}"
@@ -222,9 +228,11 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         def _done():
             return os.path.exists(out_path)
 
-        wait_for(_done, timeout=timeout)
-        if not os.path.exists(out_path):
-            return ""
+        if not wait_for(_done, timeout=timeout):
+            raise TimeoutError(
+                f"bergr event did not finish within {timeout}s "
+                f"(waiting for {out_path})"
+            )
         with open(out_path) as f:
             content = f.read()
         output, _, exit_line = content.rpartition("\n__EXIT__:")

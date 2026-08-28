@@ -264,6 +264,20 @@ class SmokeRobustness(unittest.TestCase):
             # name. That round-trip is what proves no shell execution occurred.
             self.assertEqual(sb.windows("prj"), [f"{weird}✓"])
 
+    def test_hook_payload_with_shell_metacharacters_is_safe(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            # A field value chosen by whatever the hook payload's source
+            # controls (e.g. a prompt or tool-input string), not by bergr or
+            # the test harness. If this were shell-interpolated on the way to
+            # `bergr event`'s stdin, `$(...)` would execute and `touch` would
+            # run before bergr ever saw the JSON.
+            marker = os.path.join(sb._tmpdir, "should-not-exist")
+            payload = hook_payload("Stop", prompt=f"$(touch {marker}) `id` $HOME")
+            sb.event(payload, session="prj", window="impl", agent="impl")
+            self.assertTrue(sb.wait_for_state("prj", "impl"))
+            self.assertFalse(os.path.exists(marker))
+
     def test_agent_name_with_unicode_is_safe(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
