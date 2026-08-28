@@ -234,7 +234,9 @@ class TmuxSandbox(contextlib.AbstractContextManager):
     # -- state file inspection ----------------------------------------------
 
     def state_path(self, session, agent):
-        return os.path.join(self.xdg_cache, "bergr", session, f"{agent}.state")
+        session_component = _encode_session_component(session)
+        agent_component = _encode_path_component(agent)
+        return os.path.join(self.xdg_cache, "bergr", session_component, f"{agent_component}.state")
 
     def state(self, session, agent):
         path = self.state_path(session, agent)
@@ -276,3 +278,25 @@ def wait_for(predicate, timeout=5.0, interval=0.025):
 
 def _sh_quote(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def _escape_path_component(component):
+    """Mirrors src/fs_util.rs::escape_path_component -- '/', '\\', '%' become
+    %XX, byte-for-byte (bergr operates on raw bytes, not code points)."""
+    encoded = []
+    for b in component.encode("utf-8"):
+        if b in (0x2F, 0x5C, 0x25):  # '/', '\\', '%'
+            encoded.append(f"%{b:02x}")
+        else:
+            encoded.append(chr(b))
+    return "".join(encoded)
+
+
+def _encode_path_component(component):
+    """Mirrors src/fs_util.rs::encode_path_component (agent names: escaped + lowercased)."""
+    return _escape_path_component(component).lower()
+
+
+def _encode_session_component(component):
+    """Mirrors src/fs_util.rs::encode_session_component (session names: escaped, case kept)."""
+    return _escape_path_component(component)

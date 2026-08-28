@@ -158,8 +158,9 @@ class SmokeIsolation(unittest.TestCase):
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl", agent="ghost")
             self.assertTrue(sb.wait_for_state("prj", "ghost"))
-            # no window named "ghost" exists, nothing should have been renamed/crashed
-            self.assertEqual(sb.windows("prj"), ["impl"])
+            # the live window is renamed by BERGR_AGENT's name, not the window's own
+            # prior name -- "impl" becomes "ghost✓", not "impl✓".
+            self.assertEqual(sb.windows("prj"), ["ghost✓"])
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +258,11 @@ class SmokeRobustness(unittest.TestCase):
             weird = "a; rm -rf /tmp/nope && echo $(whoami) `id`"
             sb.event(hook_payload("Stop"), session="prj", window="impl", agent=weird)
             self.assertTrue(sb.wait_for_state("prj", weird))
-            # window "impl" must be untouched -- no matching window for this agent
-            self.assertEqual(sb.windows("prj"), ["impl"])
+            # The window is renamed to this literal string (BERGR_AGENT + symbol),
+            # never shell-interpreted -- had `$(whoami)`/backticks been expanded by a
+            # shell along the way, this exact string would not survive as a window
+            # name. That round-trip is what proves no shell execution occurred.
+            self.assertEqual(sb.windows("prj"), [f"{weird}✓"])
 
     def test_agent_name_with_unicode_is_safe(self):
         with TmuxSandbox() as sb:
@@ -602,8 +606,8 @@ class SmokeAgentSwitch(unittest.TestCase):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl", agent="feature/foo")
+            self.assertTrue(sb.wait_for_state("prj", "feature/foo"))
             state_dir = os.path.join(sb.xdg_cache, "bergr", "prj")
-            self.assertTrue(sb.wait_for(lambda: os.path.isdir(state_dir)))
             self.assertEqual(os.listdir(state_dir), ["feature%2ffoo.state"])
 
 
