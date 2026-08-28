@@ -36,30 +36,6 @@ pub fn current_session() -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-pub fn current_window_name() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "#W"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let name = strip_line_ending(String::from_utf8(out.stdout).ok()?);
-    if name.is_empty() { None } else { Some(name) }
-}
-
-pub fn current_window_index() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "#I"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let index = strip_line_ending(String::from_utf8(out.stdout).ok()?);
-    if index.is_empty() { None } else { Some(index) }
-}
-
 pub fn current_window_id() -> Option<String> {
     let out = Command::new("tmux")
         .args(["display-message", "-p", "#{window_id}"])

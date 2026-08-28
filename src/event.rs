@@ -64,23 +64,8 @@ pub fn run() {
     // reads (each its own ad hoc `tmux display-message`) can each resolve to a
     // *different* window than the others, mixing one invocation's agent name
     // with another's window id.
-    let window = current_window();
-    // `current_window()` requires id, index, and name to all succeed — but
-    // index is irrelevant to agent resolution (rename now targets `id`, not
-    // index). Falling back to a fresh name-only read here, rather than
-    // letting an index-read failure veto agent resolution too, only matters
-    // on that already-degraded path: it can't reopen the race in the common
-    // case where `current_window()` succeeds.
-    let fallback_name = if window.is_none() {
-        tmux::current_window_name()
-    } else {
-        None
-    };
-    let window_name = window
-        .as_ref()
-        .map(|w| w.name.as_str())
-        .or(fallback_name.as_deref());
-    let agent = resolve_agent(window_name);
+    let window = current_window(&session);
+    let agent = resolve_agent(window.as_ref().map(|w| w.name.as_str()));
 
     match state::state_for_event(&payload.hook_event_name) {
         None => {
@@ -152,13 +137,17 @@ pub fn run() {
 }
 
 /// The current tmux window as a `tmux::Window`, or `None` if any of its id, index,
-/// or name can't be read (e.g. not inside tmux).
-fn current_window() -> Option<Window> {
-    Some(Window {
-        id: tmux::current_window_id()?,
-        index: tmux::current_window_index()?,
-        name: tmux::current_window_name()?,
-    })
+/// or name can't be read (e.g. not inside tmux), or the id no longer matches
+/// any window in `session` (closed between the two reads below).
+///
+/// Reads the id via one ambient `display-message`, then looks up index/name
+/// for that id via `list_windows` rather than two more ambient reads — one
+/// batch call returns every window's id/index/name from a single tmux
+/// snapshot, so they can't individually resolve to different windows the way
+/// three separate `display-message` calls could.
+fn current_window(session: &str) -> Option<Window> {
+    let id = tmux::current_window_id()?;
+    tmux::list_windows(session)?.into_iter().find(|w| w.id == id)
 }
 
 /// Scans `session`'s state directory for the record matching `window` (see
