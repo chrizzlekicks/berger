@@ -7,7 +7,7 @@ use crate::state::{self, StateRecord};
 use crate::tmux::{self, Window};
 use std::env;
 use std::io::{Read, stdin};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Resolves the agent name: `$BERGR_AGENT` override (mirrors amux's `AMUX_AGENT`),
@@ -104,6 +104,9 @@ pub fn run() {
                     return;
                 }
             };
+            if let Some(window) = current_window() {
+                remove_stale_record_for_window(&session, &window, &path);
+            }
             let new_name = format!("{agent}{}", new_state.symbol());
             let record = StateRecord {
                 agent: agent.clone(),
@@ -143,12 +146,46 @@ fn find_record_path_for_window(session: &str, window: &Window) -> Option<PathBuf
     let dir = state::cache_root()
         .ok()?
         .join(encode_path_component(session));
-    for (path, record) in state::read_session_records(&dir) {
+    find_record_path_in_dir(&dir, window)
+}
+
+/// Session-dir-taking core of `find_record_path_for_window`, split out so tests can
+/// point it at a temp dir instead of the real cache root.
+fn find_record_path_in_dir(dir: &Path, window: &Window) -> Option<PathBuf> {
+    for (path, record) in state::read_session_records(dir) {
         if window_matches_record(window, &record) {
             return Some(path);
         }
     }
     None
+}
+
+/// Deletes `window`'s existing record if it lives at a different path than
+/// `new_path`, so a record written under one agent name doesn't linger once the
+/// window's resolved agent changes (e.g. `BERGR_AGENT` diverging) while `window_id`
+/// stays the same. Must run before the new record is written at `new_path`: once
+/// written, it would itself match `window` too, making the lookup pick between two
+/// matching records nondeterministically.
+fn remove_stale_record_for_window(session: &str, window: &Window, new_path: &Path) {
+    let Ok(root) = state::cache_root() else {
+        return;
+    };
+    let dir = root.join(encode_path_component(session));
+    remove_stale_record_in_dir(&dir, window, new_path);
+}
+
+/// Dir-taking core of `remove_stale_record_for_window`, split out so tests can point
+/// it at a temp dir instead of the real cache root.
+fn remove_stale_record_in_dir(dir: &Path, window: &Window, new_path: &Path) {
+    let Some(old_path) = find_record_path_in_dir(dir, window) else {
+        return;
+    };
+    if old_path == new_path {
+        return;
+    }
+    if let Err(e) = state::remove_state_file(&old_path) {
+        eprintln!("bergr event: failed deleting {}: {e}", old_path.display());
+    }
 }
 
 /// Renames the current window by its live index, not by matching `agent` against
@@ -179,5 +216,74 @@ fn now_utc() -> String {
             eprintln!("bergr event: could not run `date`: {e}");
             String::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::State;
+
+    fn record(agent: &str, window_id: &str) -> StateRecord {
+        StateRecord {
+            agent: agent.to_string(),
+            state: State::Working,
+            updated_at: "2026-08-19T12:00:00Z".to_string(),
+            harness: "claude".to_string(),
+            session: "s".to_string(),
+            window: agent.to_string(),
+            window_id: Some(window_id.to_string()),
+        }
+    }
+
+    #[test]
+    fn removes_old_agent_record_when_window_agent_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("a.state");
+        let new_path = dir.path().join("b.state");
+        fs_util::write_atomic(&old_path, &record("a", "@1").to_kv()).unwrap();
+
+        let window = Window {
+            id: "@1".to_string(),
+            index: "1".to_string(),
+            name: "b".to_string(),
+        };
+        remove_stale_record_in_dir(dir.path(), &window, &new_path);
+        fs_util::write_atomic(&new_path, &record("b", "@1").to_kv()).unwrap();
+
+        assert!(!old_path.exists());
+        assert!(new_path.exists());
+    }
+
+    #[test]
+    fn keeps_record_when_path_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.state");
+        fs_util::write_atomic(&path, &record("a", "@1").to_kv()).unwrap();
+
+        let window = Window {
+            id: "@1".to_string(),
+            index: "1".to_string(),
+            name: "a".to_string(),
+        };
+        remove_stale_record_in_dir(dir.path(), &window, &path);
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn leaves_dir_untouched_when_no_record_matches_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let unrelated = dir.path().join("a.state");
+        fs_util::write_atomic(&unrelated, &record("a", "@1").to_kv()).unwrap();
+
+        let window = Window {
+            id: "@2".to_string(),
+            index: "1".to_string(),
+            name: "b".to_string(),
+        };
+        remove_stale_record_in_dir(dir.path(), &window, &dir.path().join("b.state"));
+
+        assert!(unrelated.exists());
     }
 }
