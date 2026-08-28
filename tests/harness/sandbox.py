@@ -165,41 +165,53 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         """Run `bergr event` inside a run-shell targeted at session:window, so
         `tmux display-message -p '#S'/'#W'` resolve to a real client context.
         run-shell's own stdout goes to tmux (not to us), so we redirect to a
-        file and read it back; run-shell is async, so callers must poll for
-        the effect (state file / window rename) rather than trusting return
-        order.
+        temp file and rename it into place only after `bergr event` exits --
+        callers polling for `out_path` are then guaranteed to see a fully
+        written file, never a partial one. The child's own exit code is
+        appended as a trailing line and split off below, since run-shell is
+        async and its own dispatch return code says nothing about whether
+        `bergr event` itself exited zero.
 
-        NOT safe to call concurrently for different windows without an
-        explicit `agent=` override: this selects `window` as current before
-        dispatch (see below), and that select is not atomic with run-shell's
-        dispatch -- two overlapping calls can race and cross windows. Pass
-        `agent=` (bypassing #W entirely) for concurrent-call tests, as
-        SmokeConcurrency does."""
+        A bare `tmux display-message -p '#W'` inside the dispatched shell
+        always resolves to the session's *active* window (confirmed
+        empirically -- run-shell's `-t` only controls where output is
+        displayed, not what `#W` resolves to, and bergr's own window
+        rename/lookup logic likewise acts on the active window, not `-t`'s
+        target). So the target window must be selected before dispatch. That
+        selection and the dispatch are chained as a single `tmux cmd \;
+        cmd` invocation -- one client request tmux executes as one atomic
+        unit -- so concurrent calls for different windows can't interleave
+        and cross windows the way two separate `select-window` /
+        `run-shell` calls could."""
         # run-shell splits its command argument on newlines like a tmux config
         # file (confirmed empirically -- a literal heredoc's embedded newlines
         # never reach the child process). So the whole thing must be a single
         # line: wrap in `sh -c '...'` and feed the payload via printf with
         # explicit \n escapes rather than a real multi-line heredoc.
-        # run-shell's `-t` only controls where OUTPUT is displayed, not which
-        # window a bare `tmux display-message -p '#W'` (no -t) resolves
-        # against inside the dispatched shell -- that always resolves to the
-        # session's *active* window (confirmed empirically: firing an event
-        # "at" a non-active window still updated the active one). So a
-        # multi-window session must select the target window first.
-        if not self._dead:
-            _real_tmux("-L", self.socket, "select-window", "-t", f"{session}:{window}")
-
         out_path = os.path.join(self._tmpdir, f"out-{next(_socket_counter)}.txt")
+        tmp_path = out_path + ".part"
         extra = {"BERGR_AGENT": agent} if agent is not None else {}
         prefix = self._env_prefix(extra)
         payload_for_printf = payload_json.replace("\\", "\\\\").replace('"', '\\"')
         inner = (
             f"printf \"%s\" \"{payload_for_printf}\" | "
-            f"{prefix} {_sh_quote(BERGR_BIN)} event >{_sh_quote(out_path)} 2>&1"
+            f"{prefix} {_sh_quote(BERGR_BIN)} event >{_sh_quote(tmp_path)} 2>&1; "
+            f"printf \"\\n__EXIT__:%s\\n\" \"$?\" >>{_sh_quote(tmp_path)}; "
+            f"mv {_sh_quote(tmp_path)} {_sh_quote(out_path)}"
         )
         cmd = f"sh -c {_sh_quote(inner)}"
-        target = f"{session}:{window}" if not self._dead else None
-        args = ["-L", self.socket, "run-shell"]
+        # `window` may already be stale by the time this is called (e.g.
+        # renamed by a prior event on the same window under a different
+        # agent) -- callers passing `agent=` rely on BERGR_AGENT for identity
+        # and don't need `window` to still exist. Only target a window that's
+        # actually still present, so a stale name degrades to "no target"
+        # (output display falls back to the session's active window; harmless
+        # since output is redirected to a file) instead of a hard failure.
+        target = f"{session}:{window}" if not self._dead and window in (self.windows(session) or []) else None
+        args = ["-L", self.socket]
+        if target:
+            args += ["select-window", "-t", target, ";"]
+        args += ["run-shell"]
         if target:
             args += ["-t", target]
         args += [cmd]
@@ -211,10 +223,15 @@ class TmuxSandbox(contextlib.AbstractContextManager):
             return os.path.exists(out_path)
 
         wait_for(_done, timeout=timeout)
-        if os.path.exists(out_path):
-            with open(out_path) as f:
-                return f.read()
-        return ""
+        if not os.path.exists(out_path):
+            return ""
+        with open(out_path) as f:
+            content = f.read()
+        output, _, exit_line = content.rpartition("\n__EXIT__:")
+        exit_code = int(exit_line.strip())
+        if exit_code != 0:
+            raise RuntimeError(f"bergr event exited {exit_code}: {output}")
+        return output
 
     def run_bergr(self, *args, stdin=None, timeout=10):
         """Run a bergr subcommand as a plain (shimmed) subprocess -- used for

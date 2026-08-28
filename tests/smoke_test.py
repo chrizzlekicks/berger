@@ -475,6 +475,7 @@ class SmokeRealClaude(unittest.TestCase):
             init_env = dict(os.environ)
             init_env["HOME"] = sb.home
             init_env["XDG_CACHE_HOME"] = sb.xdg_cache
+            init_env.pop("XDG_CONFIG_HOME", None)
             r = subprocess.run([bergr_bin, "init"], capture_output=True, text=True, env=init_env, timeout=10)
             self.assertEqual(r.returncode, 0, r.stderr)
 
