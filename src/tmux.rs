@@ -36,30 +36,6 @@ pub fn current_session() -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-pub fn current_window_name() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "#W"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let name = strip_line_ending(String::from_utf8(out.stdout).ok()?);
-    if name.is_empty() { None } else { Some(name) }
-}
-
-pub fn current_window_index() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "#I"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let index = strip_line_ending(String::from_utf8(out.stdout).ok()?);
-    if index.is_empty() { None } else { Some(index) }
-}
-
 pub fn current_window_id() -> Option<String> {
     let out = Command::new("tmux")
         .args(["display-message", "-p", "#{window_id}"])
@@ -107,6 +83,18 @@ fn rename_window_args(session: &str, index: &str, new_name: &str) -> Vec<String>
     ]
 }
 
+/// `window_id` (tmux's `@N` form) is unique across the whole server, so it needs
+/// no session qualifier — unlike `index`, which is only unique within a session
+/// and can shift when windows move.
+fn rename_window_by_id_args(window_id: &str, new_name: &str) -> Vec<String> {
+    vec![
+        "rename-window".to_string(),
+        "-t".to_string(),
+        window_id.to_string(),
+        new_name.to_string(),
+    ]
+}
+
 fn parse_window_list(text: &str) -> Vec<Window> {
     let mut windows = Vec::new();
     for line in text.lines() {
@@ -140,6 +128,18 @@ pub fn list_windows(session: &str) -> Option<Vec<Window>> {
 pub fn rename_window(session: &str, index: &str, new_name: &str) -> bool {
     Command::new("tmux")
         .args(rename_window_args(session, index, new_name))
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Renames by `window_id` rather than `(session, index)` — the caller already
+/// has the id from an earlier lookup, so this avoids a second, separately-timed
+/// tmux call that could target a different window if the active window changed
+/// in between (see `event::rename_current_window`).
+pub fn rename_window_by_id(window_id: &str, new_name: &str) -> bool {
+    Command::new("tmux")
+        .args(rename_window_by_id_args(window_id, new_name))
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
@@ -206,6 +206,14 @@ mod tests {
         assert_eq!(
             rename_window_args("myproject", "1", "impl!"),
             vec!["rename-window", "-t", "myproject:1", "impl!"]
+        );
+    }
+
+    #[test]
+    fn rename_window_by_id_args_targets_the_id_alone() {
+        assert_eq!(
+            rename_window_by_id_args("@3", "impl!"),
+            vec!["rename-window", "-t", "@3", "impl!"]
         );
     }
 }
