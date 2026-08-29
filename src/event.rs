@@ -147,7 +147,9 @@ pub fn run() {
 /// three separate `display-message` calls could.
 fn current_window(session: &str) -> Option<Window> {
     let id = tmux::current_window_id()?;
-    tmux::list_windows(session)?.into_iter().find(|w| w.id == id)
+    tmux::list_windows(session)?
+        .into_iter()
+        .find(|w| w.id == id)
 }
 
 /// Scans `session`'s state directory for the record matching `window` (see
