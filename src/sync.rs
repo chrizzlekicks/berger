@@ -70,9 +70,10 @@ fn prune_orphaned(
 /// renamed. A name-based check alone can't tell those apart (a `BERGER_AGENT`-driven
 /// rename also stops matching by name), which is why that shared check prefers the
 /// stable `window_id` when the record has one. A record whose `window_id` collides
-/// with a live window only because a restarted tmux server reused the id (see
-/// `window_matches_record`) is also orphaned — its actual window is gone, and it
-/// should be pruned rather than mistaken for still live.
+/// with a live window only because a restarted tmux server reused the id, but whose
+/// stripped name also happens to match, is retained rather than pruned — the same
+/// coincidental-name risk `window_matches_record`'s fallback accepts, inherited
+/// from `legacy/amux`.
 fn is_orphaned(
     record: &state::StateRecord,
     windows: &[Window],
@@ -158,14 +159,25 @@ mod tests {
     }
 
     #[test]
-    fn window_id_orphans_record_when_server_pid_mismatches() {
+    fn window_id_orphans_record_when_server_pid_mismatches_and_name_does_not_match() {
         // The window id matches, but a restarted tmux server reused it for an
-        // unrelated live window — the recorded server_pid disagrees, so this
-        // must be pruned rather than kept alive.
+        // unrelated live window — the recorded server_pid disagrees, and the
+        // window's name doesn't match either, so this must be pruned.
         let mut stale = record_with_window_id("impl", "@1");
         stale.server_pid = Some("111".to_string());
         let windows = [window("@1", "unrelated")];
         assert!(is_orphaned(&stale, &windows, Some("222")));
+    }
+
+    #[test]
+    fn window_id_falls_back_to_name_when_server_pid_mismatches() {
+        // Same as above, but the reused window happens to share a stripped name
+        // with the stale record's agent — this is retained (matches by name),
+        // the coincidental-name risk inherited from legacy/amux.
+        let mut stale = record_with_window_id("impl", "@1");
+        stale.server_pid = Some("111".to_string());
+        let windows = [window("@1", "impl")];
+        assert!(!is_orphaned(&stale, &windows, Some("222")));
     }
 
     #[test]

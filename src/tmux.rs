@@ -1,3 +1,4 @@
+use std::env;
 use std::process::Command;
 
 /// A single tmux window: `{window_id}:{window_index}:{window_name}`, as returned by
@@ -24,28 +25,42 @@ fn strip_line_ending(mut s: String) -> String {
     s
 }
 
-pub fn current_session() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "#S"])
-        .output()
-        .ok()?;
+/// Runs `display-message -p <format>`, targeted at `$TMUX_PANE` when it's set.
+///
+/// A hook fires as a child process of the pane running Claude Code, which is
+/// not necessarily the client's currently-focused window — so an untargeted
+/// `display-message` (amux's own only when `$TMUX_PANE` was unset, see
+/// `legacy/amux`'s `cmd_agent_name`) would silently query and rename whatever
+/// window happens to be focused at that instant instead of the one that
+/// actually triggered the hook.
+fn display_message(format: &str) -> Option<String> {
+    let mut args = vec!["display-message".to_string()];
+    if let Ok(pane) = env::var("TMUX_PANE")
+        && !pane.is_empty()
+    {
+        args.push("-t".to_string());
+        args.push(pane);
+    }
+    args.push("-p".to_string());
+    args.push(format.to_string());
+
+    let out = Command::new("tmux").args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let name = strip_line_ending(String::from_utf8(out.stdout).ok()?);
-    if name.is_empty() { None } else { Some(name) }
+    let value = strip_line_ending(String::from_utf8(out.stdout).ok()?);
+    if value.is_empty() { None } else { Some(value) }
 }
 
-pub fn current_window_id() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "#{window_id}"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let id = strip_line_ending(String::from_utf8(out.stdout).ok()?);
-    if id.is_empty() { None } else { Some(id) }
+pub fn current_session() -> Option<String> {
+    display_message("#S")
+}
+
+/// The id of the window that owns `$TMUX_PANE` — the pane a hook actually runs
+/// in — not the client's currently-focused window, which can be a different
+/// window entirely (see `display_message`).
+pub fn pane_window_id() -> Option<String> {
+    display_message("#{window_id}")
 }
 
 /// The tmux server's own PID, stable for the server's lifetime and distinct
@@ -135,8 +150,7 @@ pub fn rename_window(session: &str, index: &str, new_name: &str) -> bool {
 
 /// Renames by `window_id` rather than `(session, index)` — the caller already
 /// has the id from an earlier lookup, so this avoids a second, separately-timed
-/// tmux call that could target a different window if the active window changed
-/// in between (see `event::rename_current_window`).
+/// tmux call that could target a different window (see `event::rename_window`).
 pub fn rename_window_by_id(window_id: &str, new_name: &str) -> bool {
     Command::new("tmux")
         .args(rename_window_by_id_args(window_id, new_name))
