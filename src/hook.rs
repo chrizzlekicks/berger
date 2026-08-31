@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 /// Deserialized tolerantly: unknown fields are ignored, and every field beyond
 /// `hook_event_name` is optional, since several events (`PostToolUseFailure`,
-/// `StopFailure`, `SessionEnd`) carry undocumented payload shapes bergr doesn't need.
+/// `StopFailure`, `SessionEnd`) carry undocumented payload shapes berger doesn't need.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct HookPayload {
     pub hook_event_name: String,

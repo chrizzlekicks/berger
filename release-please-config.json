@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "rust",
-      "package-name": "bergr"
+      "package-name": "berger"
     }
   }
 }

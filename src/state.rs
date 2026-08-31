@@ -134,7 +134,7 @@ pub fn cache_root() -> io::Result<PathBuf> {
         let path = PathBuf::from(xdg);
 
         if path.has_root() {
-            return Ok(path.join("bergr"));
+            return Ok(path.join("berger"));
         }
     }
 
@@ -148,7 +148,7 @@ pub fn cache_root() -> io::Result<PathBuf> {
             )
         })?;
 
-    Ok(home.join(".cache").join("bergr"))
+    Ok(home.join(".cache").join("berger"))
 }
 
 pub fn state_path(session: &str, agent: &str) -> io::Result<PathBuf> {
@@ -176,7 +176,7 @@ pub fn read_session_records(dir: &Path) -> Vec<(PathBuf, StateRecord)> {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return records,
         Err(e) => {
-            eprintln!("bergr: cannot scan {}: {e}", dir.display());
+            eprintln!("berger: cannot scan {}: {e}", dir.display());
             return records;
         }
     };
@@ -188,7 +188,7 @@ pub fn read_session_records(dir: &Path) -> Vec<(PathBuf, StateRecord)> {
         }
         match read_record(&path) {
             Some(record) => records.push((path, record)),
-            None => eprintln!("bergr: could not parse {}", path.display()),
+            None => eprintln!("berger: could not parse {}", path.display()),
         }
     }
     records

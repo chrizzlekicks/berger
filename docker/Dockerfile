@@ -1,4 +1,4 @@
-# Manual test rig for bergr: tmux + claude + bergr in one container.
+# Manual test rig for berger: tmux + claude + berger in one container.
 # Not a build artifact for release — local verification only.
 
 FROM rust:1-slim-bookworm AS builder
@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-COPY --from=builder /src/target/release/bergr /usr/local/bin/bergr
+COPY --from=builder /src/target/release/berger /usr/local/bin/berger
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY docker/fake-event.sh /usr/local/bin/fake-event
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/fake-event

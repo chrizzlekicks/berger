@@ -19,7 +19,7 @@ pub struct Rename {
 
 /// True when `record` is the one `window` represents: matched by the record's
 /// stable `window_id` when it has one — this is what lets a window whose name has
-/// drifted away from its agent (e.g. via `BERGR_AGENT`) still be found. Records with
+/// drifted away from its agent (e.g. via `BERGER_AGENT`) still be found. Records with
 /// no `window_id` (written before that field existed) fall back to matching by
 /// name, with any suffix stripped.
 ///
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn matches_by_window_id_when_name_has_drifted_from_agent() {
-        // BERGR_AGENT="impl" in a window actually named "project": name-based
+        // BERGER_AGENT="impl" in a window actually named "project": name-based
         // matching would miss this record entirely, but window_id still finds it.
         let mut drifted = record("impl", State::Approval);
         drifted.window_id = Some("@1".to_string());

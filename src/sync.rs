@@ -14,7 +14,7 @@ pub fn run(session: &str) {
     let dir = match cache_root() {
         Ok(root) => root.join(encode_session_component(session)),
         Err(e) => {
-            eprintln!("bergr sync: {e}");
+            eprintln!("berger sync: {e}");
             process::exit(1);
         }
     };
@@ -22,7 +22,7 @@ pub fn run(session: &str) {
     let records = state::read_session_records(&dir);
 
     let Some(windows) = tmux::list_windows(session) else {
-        eprintln!("bergr sync: could not list windows for session '{session}'");
+        eprintln!("berger sync: could not list windows for session '{session}'");
         process::exit(1);
     };
 
@@ -31,7 +31,7 @@ pub fn run(session: &str) {
     for rename in plan_renames(&record_refs, &windows, server_pid.as_deref()) {
         if !tmux::rename_window(session, &rename.index, &rename.new_name) {
             eprintln!(
-                "bergr sync: failed to rename window {} to '{}'",
+                "berger sync: failed to rename window {} to '{}'",
                 rename.index, rename.new_name
             );
         }
@@ -60,14 +60,14 @@ fn prune_orphaned(
         if is_orphaned(record, windows, current_server_pid)
             && let Err(e) = state::remove_state_file(path)
         {
-            eprintln!("bergr sync: failed removing {}: {e}", path.display());
+            eprintln!("berger sync: failed removing {}: {e}", path.display());
         }
     }
 }
 
 /// A record is orphaned when no live window matches it (see
 /// `reconcile::window_matches_record`) — i.e. its window is closed, not merely
-/// renamed. A name-based check alone can't tell those apart (a `BERGR_AGENT`-driven
+/// renamed. A name-based check alone can't tell those apart (a `BERGER_AGENT`-driven
 /// rename also stops matching by name), which is why that shared check prefers the
 /// stable `window_id` when the record has one. A record whose `window_id` collides
 /// with a live window only because a restarted tmux server reused the id (see
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn window_id_retains_record_when_window_is_only_renamed() {
-        // BERGR_AGENT drifted the window away from a name-based match, but the
+        // BERGER_AGENT drifted the window away from a name-based match, but the
         // window itself (tracked by id) is still alive — must not be pruned.
         let windows = [window("@1", "project")];
         assert!(!is_orphaned(

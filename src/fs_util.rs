@@ -42,7 +42,7 @@ fn escape_path_component(component: &str) -> String {
     encoded
 }
 
-/// Escapes and lowercases `component`. Used for the agent name: bergr treats
+/// Escapes and lowercases `component`. Used for the agent name: berger treats
 /// agent names as case-insensitive everywhere, not just on case-folding
 /// filesystems, so `Impl` and `impl` always share one state file rather than
 /// colliding only on some hosts (e.g. default macOS volumes) and not others.

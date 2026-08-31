@@ -10,7 +10,7 @@ mod sync;
 mod tmux;
 
 fn usage() -> ! {
-    eprintln!("usage: bergr <init|event|reset|sync --session <name>>");
+    eprintln!("usage: berger <init|event|reset|sync --session <name>>");
     std::process::exit(1);
 }
 
@@ -26,20 +26,20 @@ fn main() {
                 if arg == "--session" {
                     session = args.next();
                 } else {
-                    eprintln!("bergr sync: unknown argument '{arg}'");
+                    eprintln!("berger sync: unknown argument '{arg}'");
                     std::process::exit(1);
                 }
             }
             match session {
                 Some(s) => sync::run(&s),
                 None => {
-                    eprintln!("bergr sync: --session <name> is required");
+                    eprintln!("berger sync: --session <name> is required");
                     std::process::exit(1);
                 }
             }
         }
         Some(other) => {
-            eprintln!("bergr: unknown command '{other}'");
+            eprintln!("berger: unknown command '{other}'");
             usage();
         }
         None => usage(),

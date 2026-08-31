@@ -17,13 +17,13 @@ const HOOK_EVENTS: &[&str] = &[
 ];
 
 /// Rewrites `hooks[event]` in-place: drops entries whose `command` contains "amux" or
-/// is a previously-generated bergr hook (any old `bergr_cmd` shape, so a reinstalled
+/// is a previously-generated berger hook (any old `berger_cmd` shape, so a reinstalled
 /// binary replaces rather than duplicates its hook), and ensures exactly one entry
-/// with `command == bergr_cmd`. Unrelated entries are left untouched.
+/// with `command == berger_cmd`. Unrelated entries are left untouched.
 ///
 /// `settings` is hand-editable, not a trusted internal type, so a shape mismatch is
 /// reported as an error rather than a panic.
-pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> {
+pub fn merge_hooks(settings: &mut Value, berger_cmd: &str) -> Result<(), String> {
     let root = settings
         .as_object_mut()
         .ok_or("settings.json root must be an object")?;
@@ -43,7 +43,7 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> 
         let mut kept = Vec::new();
         for mut entry in entries.drain(..) {
             remove_matching_commands(&mut entry, "amux");
-            remove_stale_bergr_commands(&mut entry, bergr_cmd);
+            remove_stale_berger_commands(&mut entry, berger_cmd);
             if !entry_hooks_is_empty(&entry) {
                 kept.push(entry);
             }
@@ -51,15 +51,15 @@ pub fn merge_hooks(settings: &mut Value, bergr_cmd: &str) -> Result<(), String> 
         *entries = kept;
 
         // Exact match, not `entry_command_contains`'s substring check: a hand-added
-        // command that merely mentions `bergr_cmd` as a substring (e.g. the same
+        // command that merely mentions `berger_cmd` as a substring (e.g. the same
         // path invoked with extra flags) must not be mistaken for the canonical
         // hook — that would suppress installing the real one.
         let already_present = entries
             .iter()
-            .any(|entry| entry_command_equals(entry, bergr_cmd));
+            .any(|entry| entry_command_equals(entry, berger_cmd));
         if !already_present {
             entries.push(serde_json::json!({
-                "hooks": [{ "type": "command", "command": bergr_cmd }]
+                "hooks": [{ "type": "command", "command": berger_cmd }]
             }));
         }
     }
@@ -107,17 +107,17 @@ fn remove_matching_commands(entry: &mut Value, needle: &str) {
     *inner = kept;
 }
 
-/// Drops nested `hooks[].command` entries that are a previously-generated bergr hook
-/// but no longer match the current `bergr_cmd` (e.g. after the binary moved), keeping
+/// Drops nested `hooks[].command` entries that are a previously-generated berger hook
+/// but no longer match the current `berger_cmd` (e.g. after the binary moved), keeping
 /// any sibling commands in the same group.
-fn remove_stale_bergr_commands(entry: &mut Value, bergr_cmd: &str) {
+fn remove_stale_berger_commands(entry: &mut Value, berger_cmd: &str) {
     let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
         return;
     };
     let mut kept = Vec::new();
     for hook in inner.drain(..) {
         let stale = match hook.get("command").and_then(Value::as_str) {
-            Some(c) => c != bergr_cmd && is_generated_bergr_command(c),
+            Some(c) => c != berger_cmd && is_generated_berger_command(c),
             None => false,
         };
         if !stale {
@@ -127,11 +127,11 @@ fn remove_stale_bergr_commands(entry: &mut Value, bergr_cmd: &str) {
     *inner = kept;
 }
 
-/// True for a command shaped like a `bergr init`-generated hook: a single
-/// shell-quoted path whose basename is `bergr`, followed by the `event` subcommand.
+/// True for a command shaped like a `berger init`-generated hook: a single
+/// shell-quoted path whose basename is `berger`, followed by the `event` subcommand.
 /// Matching by shape (not exact string) is what lets re-init recognize its own prior
 /// output even when the binary's path has changed since the last run.
-fn is_generated_bergr_command(command: &str) -> bool {
+fn is_generated_berger_command(command: &str) -> bool {
     let Some(rest) = command.strip_suffix(" event") else {
         return false;
     };
@@ -142,7 +142,7 @@ fn is_generated_bergr_command(command: &str) -> bool {
         Some(quoted_path) => shell_unquote_body(quoted_path),
         None => rest.to_string(),
     };
-    Path::new(&path).file_name().and_then(|n| n.to_str()) == Some("bergr")
+    Path::new(&path).file_name().and_then(|n| n.to_str()) == Some("berger")
 }
 
 fn entry_hooks_is_empty(entry: &Value) -> bool {
@@ -227,7 +227,7 @@ fn argv_is_amux_watch(args: &[&str]) -> bool {
 }
 
 /// Quotes `s` for safe use as a single argument in a POSIX shell command line,
-/// even when `s` itself contains single quotes (e.g. `/Users/Jane O'Connor/bergr`).
+/// even when `s` itself contains single quotes (e.g. `/Users/Jane O'Connor/berger`).
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -252,24 +252,24 @@ fn shell_unquote_body(body: &str) -> String {
     out
 }
 
-pub fn tmux_conf_contents(bergr_bin: &str) -> String {
+pub fn tmux_conf_contents(berger_bin: &str) -> String {
     // `#{q:session_name}` asks tmux itself to shell-quote the expanded session name —
-    // `bergr_bin` is quoted up front since it's known before tmux ever expands this
+    // `berger_bin` is quoted up front since it's known before tmux ever expands this
     // string, but the session name isn't known until expansion time, so only tmux's
     // own format modifier can quote it safely (session names may contain spaces,
     // quotes, `$`, backticks, or `;` — tmux only rejects `.` and `:`).
     format!(
-        "# ~/.config/bergr/tmux.conf — managed by `bergr init`, do not edit\n\
+        "# ~/.config/berger/tmux.conf — managed by `berger init`, do not edit\n\
          set -g allow-rename off\n\
          set -g automatic-rename off\n\
          bind-key M run-shell \"{} sync --session #{{q:session_name}}\"\n",
-        shell_quote(bergr_bin)
+        shell_quote(berger_bin)
     )
 }
 
 fn exit_on_error<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
     result.unwrap_or_else(|e| {
-        eprintln!("bergr init: {context}: {e}");
+        eprintln!("berger init: {context}: {e}");
         std::process::exit(1);
     })
 }
@@ -295,7 +295,7 @@ fn home() -> PathBuf {
 
 /// A Cargo build output directory: `target/{debug,release}/...`, or the
 /// cross-compiled `target/<triple>/{debug,release}/...` — not merely any path with a
-/// `target` component (e.g. `/opt/target/bin/bergr` is a legitimate install path). A
+/// `target` component (e.g. `/opt/target/bin/berger` is a legitimate install path). A
 /// custom Cargo profile name isn't detected; this is a best-effort guard.
 fn is_cargo_build_dir(exe: &Path) -> bool {
     let components: Vec<_> = exe.components().collect();
@@ -314,11 +314,11 @@ fn is_cargo_build_dir(exe: &Path) -> bool {
     false
 }
 
-fn resolve_bergr_bin() -> String {
+fn resolve_berger_bin() -> String {
     let exe = env::current_exe().expect("could not resolve current executable path");
     if is_cargo_build_dir(&exe) {
         eprintln!(
-            "bergr init: refusing to run from a build directory ({}).\n\
+            "berger init: refusing to run from a build directory ({}).\n\
              Install first: cargo install --path . --root ~/.local",
             exe.display()
         );
@@ -329,18 +329,18 @@ fn resolve_bergr_bin() -> String {
         .into_string()
         .unwrap_or_else(|_| {
             eprintln!(
-                "bergr init: executable path is not valid UTF-8 ({}); \
-             move bergr to a path with only UTF-8 characters and re-run init.",
+                "berger init: executable path is not valid UTF-8 ({}); \
+             move berger to a path with only UTF-8 characters and re-run init.",
                 exe.display()
             );
             std::process::exit(1);
         })
 }
 
-/// Merges bergr's hook into `~/.claude/settings.json`, backing up the previous
+/// Merges berger's hook into `~/.claude/settings.json`, backing up the previous
 /// contents once (on first run only, since re-running init should not clobber
-/// a backup that predates any bergr changes).
-fn update_claude_settings(bergr_bin: &str) -> PathBuf {
+/// a backup that predates any berger changes).
+fn update_claude_settings(berger_bin: &str) -> PathBuf {
     let settings_path = home().join(".claude").join("settings.json");
 
     let mut settings: Value = match fs::read_to_string(&settings_path) {
@@ -355,7 +355,7 @@ fn update_claude_settings(bergr_bin: &str) -> PathBuf {
         ),
     };
 
-    let backup_path = settings_path.with_extension("json.bergr-bak");
+    let backup_path = settings_path.with_extension("json.berger-bak");
     if settings_path.exists() && !backup_path.exists() {
         exit_on_error(
             fs::copy(&settings_path, &backup_path),
@@ -364,7 +364,7 @@ fn update_claude_settings(bergr_bin: &str) -> PathBuf {
     }
 
     exit_on_error(
-        merge_hooks(&mut settings, &format!("{} event", shell_quote(bergr_bin))),
+        merge_hooks(&mut settings, &format!("{} event", shell_quote(berger_bin))),
         &format!("{} has an unexpected shape", settings_path.display()),
     );
     let rendered = serde_json::to_string_pretty(&settings).unwrap();
@@ -376,14 +376,14 @@ fn update_claude_settings(bergr_bin: &str) -> PathBuf {
     settings_path
 }
 
-fn bergr_config_dir() -> PathBuf {
-    xdg_subdir("XDG_CONFIG_HOME", ".config", "bergr")
+fn berger_config_dir() -> PathBuf {
+    xdg_subdir("XDG_CONFIG_HOME", ".config", "berger")
 }
 
 /// `$xdg_var/name`, falling back to `$HOME/home_fallback_dir/name` when the XDG var
 /// is unset, empty, or relative. Relative values are rejected rather than resolved
 /// against the CWD, since `init`/`sync` can run from different working directories
-/// and this feeds `bergr reset`'s recursive delete.
+/// and this feeds `berger reset`'s recursive delete.
 fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
     match env::var_os(xdg_var) {
         None => home().join(home_fallback_dir).join(name),
@@ -398,16 +398,16 @@ fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
     }
 }
 
-fn write_bergr_tmux_conf(bergr_bin: &str) -> PathBuf {
-    let bergr_conf_dir = bergr_config_dir();
+fn write_berger_tmux_conf(berger_bin: &str) -> PathBuf {
+    let berger_conf_dir = berger_config_dir();
     exit_on_error(
-        fs::create_dir_all(&bergr_conf_dir),
-        &format!("could not create {}", bergr_conf_dir.display()),
+        fs::create_dir_all(&berger_conf_dir),
+        &format!("could not create {}", berger_conf_dir.display()),
     );
 
-    let tmux_conf_path = bergr_conf_dir.join("tmux.conf");
+    let tmux_conf_path = berger_conf_dir.join("tmux.conf");
     exit_on_error(
-        write_atomic(&tmux_conf_path, &tmux_conf_contents(bergr_bin)),
+        write_atomic(&tmux_conf_path, &tmux_conf_contents(berger_bin)),
         &format!("could not write {}", tmux_conf_path.display()),
     );
 
@@ -451,14 +451,14 @@ fn strip_source_line(tmux_conf_contents: &str, path: &Path) -> String {
 
 /// Removes the old amux `source-file` line from `~/.tmux.conf`, backing up the
 /// previous contents once (on first run only, mirroring `update_claude_settings`)
-/// so amux's `bind-key M` can no longer override bergr's.
+/// so amux's `bind-key M` can no longer override berger's.
 fn remove_stale_amux_source_line(user_tmux_conf: &Path, contents: &str) {
     let legacy_path = legacy_amux_tmux_conf_path();
     if !sources_path(contents, &legacy_path) {
         return;
     }
 
-    let backup_path = user_tmux_conf.with_extension("conf.bergr-bak");
+    let backup_path = user_tmux_conf.with_extension("conf.berger-bak");
     if !backup_path.exists() {
         exit_on_error(
             fs::copy(user_tmux_conf, &backup_path),
@@ -473,7 +473,7 @@ fn remove_stale_amux_source_line(user_tmux_conf: &Path, contents: &str) {
     );
 
     println!(
-        "bergr init: removed stale amux `source-file` line from {} (backup: {})",
+        "berger init: removed stale amux `source-file` line from {} (backup: {})",
         user_tmux_conf.display(),
         backup_path.display()
     );
@@ -489,12 +489,12 @@ fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
 
     if already_sourced {
         println!(
-            "bergr init: {} already sources bergr's tmux config",
+            "berger init: {} already sources berger's tmux config",
             user_tmux_conf.display()
         );
     } else {
         println!(
-            "bergr init: add this to {}, then run `tmux source-file {}`:\n    {source_line}",
+            "berger init: add this to {}, then run `tmux source-file {}`:\n    {source_line}",
             user_tmux_conf.display(),
             user_tmux_conf.display(),
         );
@@ -510,7 +510,7 @@ fn warn_about_live_amux_watchers() {
     let sessions = find_running_amux_watchers(&legacy_cache);
     for session in sessions {
         eprintln!(
-            "bergr init: warning: amux watcher still running for session '{session}'. \
+            "berger init: warning: amux watcher still running for session '{session}'. \
              Kill it: kill $(cat {}/{session}/watch.pid)",
             legacy_cache.display()
         );
@@ -518,21 +518,21 @@ fn warn_about_live_amux_watchers() {
 }
 
 /// Runs the `init` command: refuses to run from a build directory, merges hooks into
-/// `~/.claude/settings.json`, writes `~/.config/bergr/tmux.conf`, creates the cache
+/// `~/.claude/settings.json`, writes `~/.config/berger/tmux.conf`, creates the cache
 /// root, and warns about any still-running amux watcher.
 pub fn run() {
-    let bergr_bin = resolve_bergr_bin();
+    let berger_bin = resolve_berger_bin();
 
-    let settings_path = update_claude_settings(&bergr_bin);
-    let tmux_conf_path = write_bergr_tmux_conf(&bergr_bin);
+    let settings_path = update_claude_settings(&berger_bin);
+    let tmux_conf_path = write_berger_tmux_conf(&berger_bin);
 
     exit_on_error(
         state::cache_root().and_then(|root| fs::create_dir_all(&root)),
         "could not create cache root",
     );
 
-    println!("bergr init: wrote {}", settings_path.display());
-    println!("bergr init: wrote {}", tmux_conf_path.display());
+    println!("berger init: wrote {}", settings_path.display());
+    println!("berger init: wrote {}", tmux_conf_path.display());
     report_tmux_conf_sourcing(&tmux_conf_path);
     warn_about_live_amux_watchers();
 }
@@ -566,29 +566,29 @@ mod tests {
 
     #[test]
     fn rejects_cargo_debug_and_release_output() {
-        assert!(is_cargo_build_dir(Path::new("/repo/target/debug/bergr")));
-        assert!(is_cargo_build_dir(Path::new("/repo/target/release/bergr")));
+        assert!(is_cargo_build_dir(Path::new("/repo/target/debug/berger")));
+        assert!(is_cargo_build_dir(Path::new("/repo/target/release/berger")));
     }
 
     #[test]
     fn rejects_cross_compiled_cargo_output() {
         assert!(is_cargo_build_dir(Path::new(
-            "/repo/target/x86_64-unknown-linux-gnu/release/bergr"
+            "/repo/target/x86_64-unknown-linux-gnu/release/berger"
         )));
     }
 
     #[test]
     fn allows_target_as_an_unrelated_path_component() {
-        assert!(!is_cargo_build_dir(Path::new("/opt/target/bin/bergr")));
+        assert!(!is_cargo_build_dir(Path::new("/opt/target/bin/berger")));
         assert!(!is_cargo_build_dir(Path::new(
-            "/home/target/.local/bin/bergr"
+            "/home/target/.local/bin/berger"
         )));
     }
 
     #[test]
     fn allows_installed_path_with_no_target_component() {
         assert!(!is_cargo_build_dir(Path::new(
-            "/home/schimetschka/.local/bin/bergr"
+            "/home/schimetschka/.local/bin/berger"
         )));
     }
 
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn replaces_amux_entries_and_keeps_unrelated_hooks() {
         let mut settings = load_fixture();
-        merge_hooks(&mut settings, "/home/schimetschka/.local/bin/bergr event").unwrap();
+        merge_hooks(&mut settings, "/home/schimetschka/.local/bin/berger event").unwrap();
 
         let pre_tool_use = settings["hooks"]["PreToolUse"].as_array().unwrap();
         assert!(
@@ -636,7 +636,7 @@ mod tests {
                 ]
             }
         });
-        merge_hooks(&mut settings, "/x/bergr event").unwrap();
+        merge_hooks(&mut settings, "/x/berger event").unwrap();
 
         let pre_tool_use = settings["hooks"]["PreToolUse"].as_array().unwrap();
         assert!(
@@ -654,38 +654,38 @@ mod tests {
     }
 
     #[test]
-    fn every_event_gets_exactly_one_bergr_entry() {
+    fn every_event_gets_exactly_one_berger_entry() {
         let mut settings = load_fixture();
-        let cmd = "/home/schimetschka/.local/bin/bergr event";
+        let cmd = "/home/schimetschka/.local/bin/berger event";
         merge_hooks(&mut settings, cmd).unwrap();
 
         for event in HOOK_EVENTS {
             let entries = settings["hooks"][event].as_array().unwrap();
-            let bergr_count = entries
+            let berger_count = entries
                 .iter()
                 .filter(|e| entry_command_contains(e, cmd))
                 .count();
             assert_eq!(
-                bergr_count, 1,
-                "event {event} should have exactly one bergr entry"
+                berger_count, 1,
+                "event {event} should have exactly one berger entry"
             );
         }
     }
 
     #[test]
-    fn moved_binary_replaces_stale_bergr_entry_instead_of_appending() {
+    fn moved_binary_replaces_stale_berger_entry_instead_of_appending() {
         let mut settings = load_fixture();
-        let old_cmd = "'/old/path/bergr' event";
+        let old_cmd = "'/old/path/berger' event";
         merge_hooks(&mut settings, old_cmd).unwrap();
 
-        let new_cmd = "'/new/path/bergr' event";
+        let new_cmd = "'/new/path/berger' event";
         merge_hooks(&mut settings, new_cmd).unwrap();
 
         for event in HOOK_EVENTS {
             let entries = settings["hooks"][event].as_array().unwrap();
             assert!(
                 !entries.iter().any(|e| entry_command_contains(e, old_cmd)),
-                "event {event} should no longer reference the old bergr path"
+                "event {event} should no longer reference the old berger path"
             );
             let new_count = entries
                 .iter()
@@ -693,32 +693,32 @@ mod tests {
                 .count();
             assert_eq!(
                 new_count, 1,
-                "event {event} should have exactly one bergr entry after the move"
+                "event {event} should have exactly one berger entry after the move"
             );
         }
     }
 
     #[test]
-    fn is_generated_bergr_command_matches_quoted_path_with_event_suffix() {
-        assert!(is_generated_bergr_command("'/x/bergr' event"));
-        assert!(is_generated_bergr_command(
-            "'/Users/Jane O'\\''Connor/bergr' event"
+    fn is_generated_berger_command_matches_quoted_path_with_event_suffix() {
+        assert!(is_generated_berger_command("'/x/berger' event"));
+        assert!(is_generated_berger_command(
+            "'/Users/Jane O'\\''Connor/berger' event"
         ));
-        assert!(!is_generated_bergr_command("'/x/bergr' sync"));
-        assert!(!is_generated_bergr_command("rtk hook claude"));
-        assert!(!is_generated_bergr_command("'/x/bergr-migration' event"));
+        assert!(!is_generated_berger_command("'/x/berger' sync"));
+        assert!(!is_generated_berger_command("rtk hook claude"));
+        assert!(!is_generated_berger_command("'/x/berger-migration' event"));
     }
 
     #[test]
-    fn is_generated_bergr_command_matches_unquoted_legacy_shape() {
-        assert!(is_generated_bergr_command("/x/bergr event"));
-        assert!(!is_generated_bergr_command("/x/bergr-migration event"));
+    fn is_generated_berger_command_matches_unquoted_legacy_shape() {
+        assert!(is_generated_berger_command("/x/berger event"));
+        assert!(!is_generated_berger_command("/x/berger-migration event"));
     }
 
     #[test]
     fn rerunning_merge_is_a_no_op() {
         let mut settings = load_fixture();
-        let cmd = "/home/schimetschka/.local/bin/bergr event";
+        let cmd = "/home/schimetschka/.local/bin/berger event";
         merge_hooks(&mut settings, cmd).unwrap();
         let once = settings.clone();
         merge_hooks(&mut settings, cmd).unwrap();
@@ -729,14 +729,14 @@ mod tests {
     fn unrelated_top_level_keys_survive() {
         let mut settings = load_fixture();
         let before_model = settings["model"].clone();
-        merge_hooks(&mut settings, "/x/bergr event").unwrap();
+        merge_hooks(&mut settings, "/x/berger event").unwrap();
         assert_eq!(settings["model"], before_model);
     }
 
     #[test]
-    fn event_with_no_prior_hooks_still_gets_bergr_entry() {
+    fn event_with_no_prior_hooks_still_gets_berger_entry() {
         let mut settings = serde_json::json!({});
-        merge_hooks(&mut settings, "/x/bergr event").unwrap();
+        merge_hooks(&mut settings, "/x/berger event").unwrap();
         for event in HOOK_EVENTS {
             let entries = settings["hooks"][event].as_array().unwrap();
             assert_eq!(entries.len(), 1);
@@ -828,15 +828,15 @@ mod tests {
 
     #[test]
     fn tmux_conf_uses_absolute_path_and_session_flag() {
-        let conf = tmux_conf_contents("/home/schimetschka/.local/bin/bergr");
-        assert!(conf.contains("'/home/schimetschka/.local/bin/bergr' sync --session"));
+        let conf = tmux_conf_contents("/home/schimetschka/.local/bin/berger");
+        assert!(conf.contains("'/home/schimetschka/.local/bin/berger' sync --session"));
         assert!(conf.contains("allow-rename off"));
     }
 
     #[test]
     fn tmux_conf_quotes_path_with_spaces() {
-        let conf = tmux_conf_contents("/Users/Jane Doe/.local/bin/bergr");
-        assert!(conf.contains("'/Users/Jane Doe/.local/bin/bergr' sync --session"));
+        let conf = tmux_conf_contents("/Users/Jane Doe/.local/bin/berger");
+        assert!(conf.contains("'/Users/Jane Doe/.local/bin/berger' sync --session"));
     }
 
     #[test]
@@ -846,14 +846,14 @@ mod tests {
         // maliciously or accidentally named session (tmux only rejects `.` and `:`
         // in session names — spaces, quotes, `$`, backticks, `;` are all legal).
         // `#{q:...}` asks tmux itself to shell-quote the expansion.
-        let conf = tmux_conf_contents("/x/bergr");
+        let conf = tmux_conf_contents("/x/berger");
         assert!(conf.contains("sync --session #{q:session_name}"));
     }
 
     #[test]
     fn tmux_conf_escapes_path_with_single_quote() {
-        let conf = tmux_conf_contents("/Users/Jane O'Connor/.local/bin/bergr");
-        assert!(conf.contains("'/Users/Jane O'\\''Connor/.local/bin/bergr' sync --session"));
+        let conf = tmux_conf_contents("/Users/Jane O'Connor/.local/bin/berger");
+        assert!(conf.contains("'/Users/Jane O'\\''Connor/.local/bin/berger' sync --session"));
     }
 
     #[test]
@@ -865,14 +865,14 @@ mod tests {
     #[test]
     fn merge_hooks_reports_error_instead_of_panicking_on_non_object_hooks() {
         let mut settings = serde_json::json!({ "hooks": [] });
-        let result = merge_hooks(&mut settings, "/x/bergr event");
+        let result = merge_hooks(&mut settings, "/x/berger event");
         assert!(result.is_err());
     }
 
     #[test]
     fn merge_hooks_reports_error_when_root_is_not_an_object() {
         let mut settings = serde_json::json!([]);
-        let result = merge_hooks(&mut settings, "/x/bergr event");
+        let result = merge_hooks(&mut settings, "/x/berger event");
         assert!(result.is_err());
     }
 
@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn xdg_subdir_falls_back_when_var_unset() {
         assert_eq!(
-            xdg_subdir("BERGR_TEST_UNSET_XDG_VAR", ".cache", "amux"),
+            xdg_subdir("BERGER_TEST_UNSET_XDG_VAR", ".cache", "amux"),
             home().join(".cache").join("amux")
         );
     }
@@ -897,11 +897,11 @@ mod tests {
     fn xdg_subdir_falls_back_when_var_relative() {
         // SAFETY: single-threaded test, restored immediately after use.
         unsafe {
-            env::set_var("BERGR_TEST_RELATIVE_XDG_VAR", "relative/cache");
+            env::set_var("BERGER_TEST_RELATIVE_XDG_VAR", "relative/cache");
         }
-        let result = xdg_subdir("BERGR_TEST_RELATIVE_XDG_VAR", ".cache", "amux");
+        let result = xdg_subdir("BERGER_TEST_RELATIVE_XDG_VAR", ".cache", "amux");
         unsafe {
-            env::remove_var("BERGR_TEST_RELATIVE_XDG_VAR");
+            env::remove_var("BERGER_TEST_RELATIVE_XDG_VAR");
         }
         assert_eq!(result, home().join(".cache").join("amux"));
     }

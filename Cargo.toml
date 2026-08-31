@@ -1,5 +1,5 @@
 [package]
-name = "bergr"
+name = "berger"
 version = "0.1.0"
 edition = "2024"
 description = "Make tmux sessions agent-aware from Claude Code lifecycle hooks"

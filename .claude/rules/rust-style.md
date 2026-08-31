@@ -1,4 +1,4 @@
-# Rust style guidelines (bergr)
+# Rust style guidelines (berger)
 
 Goal: fast, easy PR reviews. Explicit and boring beats clever.
 

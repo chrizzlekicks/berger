@@ -24,7 +24,7 @@ ALL_EVENTS = list(EVENT_TABLE.keys())
 
 
 def hook_payload(event_name, **extra):
-    """Build the minimal JSON payload bergr's HookPayload deserializer expects."""
+    """Build the minimal JSON payload berger's HookPayload deserializer expects."""
     payload = {"hook_event_name": event_name}
     payload.update(extra)
     return json.dumps(payload)

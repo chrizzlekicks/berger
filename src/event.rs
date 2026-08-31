@@ -10,13 +10,13 @@ use std::io::{Read, stdin};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Resolves the agent name: `$BERGR_AGENT` override (mirrors amux's `AMUX_AGENT`),
+/// Resolves the agent name: `$BERGER_AGENT` override (mirrors amux's `AMUX_AGENT`),
 /// else the current tmux window name (suffix stripped), else `basename($PWD)`.
 ///
 /// Not unit-tested — every branch depends on process-global state that isn't
 /// injectable/mockable here. `strip_suffix` is covered separately in `name.rs`.
 fn resolve_agent(window_name: Option<&str>) -> String {
-    if let Ok(a) = env::var("BERGR_AGENT")
+    if let Ok(a) = env::var("BERGER_AGENT")
         && !a.is_empty()
     {
         return strip_suffix(&a);
@@ -41,14 +41,14 @@ fn resolve_agent(window_name: Option<&str>) -> String {
 pub fn run() {
     let mut input = String::new();
     if stdin().read_to_string(&mut input).is_err() {
-        eprintln!("bergr event: failed to read stdin");
+        eprintln!("berger event: failed to read stdin");
         return;
     }
 
     let payload: HookPayload = match serde_json::from_str(&input) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("bergr event: malformed hook payload: {e}");
+            eprintln!("berger event: malformed hook payload: {e}");
             return;
         }
     };
@@ -59,7 +59,7 @@ pub fn run() {
         return;
     };
     // Read once, up front, and reuse everywhere below (agent resolution, stale-
-    // record lookup, rename target) — a second concurrent `bergr event` can
+    // record lookup, rename target) — a second concurrent `berger event` can
     // change the server's active window at any moment, so separate ambient
     // reads (each its own ad hoc `tmux display-message`) can each resolve to a
     // *different* window than the others, mixing one invocation's agent name
@@ -71,12 +71,12 @@ pub fn run() {
         None => {
             // SessionEnd (or an unrecognized event): clear state and strip any
             // suffix from the window, rather than leaving it stale. This is the one
-            // path where, with no watcher to notice the file vanish, bergr itself
+            // path where, with no watcher to notice the file vanish, berger itself
             // must actively clear the suffix.
             //
             // Uses the same window-to-record matching as `plan_renames`
             // (window_matches_record), not `agent`-derived paths and names: if the
-            // window was renamed since its record was written (e.g. BERGR_AGENT
+            // window was renamed since its record was written (e.g. BERGER_AGENT
             // diverging from the window name), both the record to delete and the
             // name to restore must be found from the window's live identity, not
             // resolve_agent()'s output, or the wrong file gets deleted and/or the
@@ -86,7 +86,7 @@ pub fn run() {
             // not merely "not inside tmux" — that already returned above at
             // `current_session()`), this skips the rename too rather than falling
             // back to `agent`: a stale suffix left behind here is recoverable via
-            // `bergr sync`, but renaming to a fabricated name would not be.
+            // `berger sync`, but renaming to a fabricated name would not be.
             let Some(window) = window else {
                 return;
             };
@@ -98,7 +98,7 @@ pub fn run() {
             if let Some(path) = find_record_path_for_window(&session, &window)
                 && let Err(e) = state::remove_state_file(&path)
             {
-                eprintln!("bergr event: failed deleting {}: {e}", path.display());
+                eprintln!("berger event: failed deleting {}: {e}", path.display());
                 return;
             }
             rename_current_window(&window.id, &base);
@@ -107,7 +107,7 @@ pub fn run() {
             let path = match state::state_path(&session, &agent) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("bergr event: cannot resolve state path: {e}");
+                    eprintln!("berger event: cannot resolve state path: {e}");
                     return;
                 }
             };
@@ -126,7 +126,7 @@ pub fn run() {
                 server_pid: tmux::server_pid(),
             };
             if let Err(e) = fs_util::write_atomic(&path, &record.to_kv()) {
-                eprintln!("bergr event: failed writing {}: {e}", path.display());
+                eprintln!("berger event: failed writing {}: {e}", path.display());
                 return;
             }
             if let Some(w) = &window {
@@ -182,7 +182,7 @@ fn find_record_path_in_dir(
 
 /// Deletes `window`'s existing record if it lives at a different path than
 /// `new_path`, so a record written under one agent name doesn't linger once the
-/// window's resolved agent changes (e.g. `BERGR_AGENT` diverging) while `window_id`
+/// window's resolved agent changes (e.g. `BERGER_AGENT` diverging) while `window_id`
 /// stays the same. Must run before the new record is written at `new_path`: once
 /// written, it would itself match `window` too, making the lookup pick between two
 /// matching records nondeterministically.
@@ -209,18 +209,18 @@ fn remove_stale_record_in_dir(
         return;
     }
     if let Err(e) = state::remove_state_file(&old_path) {
-        eprintln!("bergr event: failed deleting {}: {e}", old_path.display());
+        eprintln!("berger event: failed deleting {}: {e}", old_path.display());
     }
 }
 
 /// Renames `window` by its stable id, not by matching `agent` against window
-/// names (breaks when `BERGR_AGENT` diverges from the window name) and not by
+/// names (breaks when `BERGER_AGENT` diverges from the window name) and not by
 /// re-querying the live index (races: the active window can change between
 /// the caller's earlier lookup and a fresh index query here, renaming whatever
 /// window happens to be active at that later moment instead of `window`).
 fn rename_current_window(window_id: &str, new_name: &str) {
     if !tmux::rename_window_by_id(window_id, new_name) {
-        eprintln!("bergr event: failed to rename window {window_id} to '{new_name}'");
+        eprintln!("berger event: failed to rename window {window_id} to '{new_name}'");
     }
 }
 
@@ -233,12 +233,12 @@ fn now_utc() -> String {
         Ok(o) => match String::from_utf8(o.stdout) {
             Ok(s) => s.trim().to_string(),
             Err(e) => {
-                eprintln!("bergr event: `date` output was not valid UTF-8: {e}");
+                eprintln!("berger event: `date` output was not valid UTF-8: {e}");
                 String::new()
             }
         },
         Err(e) => {
-            eprintln!("bergr event: could not run `date`: {e}");
+            eprintln!("berger event: could not run `date`: {e}");
             String::new()
         }
     }

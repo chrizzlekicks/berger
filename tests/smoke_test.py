@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""bergr smoke-test suite -- runs bergr against a real, throwaway tmux server.
+"""berger smoke-test suite -- runs berger against a real, throwaway tmux server.
 
 Reproduces (and automates) the manual smoke-test flow from legacy/README.md.
-Every test runs against an isolated `tmux -L bergr-test-<pid>-<n>` server, an
-isolated HOME/XDG_CACHE_HOME, and a `tmux` PATH shim that redirects bergr's
+Every test runs against an isolated `tmux -L berger-test-<pid>-<n>` server, an
+isolated HOME/XDG_CACHE_HOME, and a `tmux` PATH shim that redirects berger's
 own tmux calls into that sandbox. The live tmux server this suite itself runs
 inside of is never touched -- see tests/harness/sandbox.py for exactly how
 and why.
@@ -12,7 +12,7 @@ Usage:
     cargo build && python3 tests/smoke_test.py
     python3 tests/smoke_test.py -v
     python3 tests/smoke_test.py SmokeLifecycle.test_permission_request_adds_bang
-    BERGR_TEST_REAL_CLAUDE=1 python3 tests/smoke_test.py   # + real-claude case
+    BERGER_TEST_REAL_CLAUDE=1 python3 tests/smoke_test.py   # + real-claude case
 """
 
 import json
@@ -24,7 +24,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from harness.sandbox import TmuxSandbox, BERGR_BIN
+from harness.sandbox import TmuxSandbox, BERGER_BIN
 from harness.payloads import hook_payload, suffixed, EVENT_TABLE, ALL_EVENTS
 
 FIXTURE_SETTINGS = os.path.join(os.path.dirname(__file__), "fixtures", "settings.json")
@@ -103,26 +103,26 @@ class SmokeLifecycle(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class SmokeAgentResolution(unittest.TestCase):
-    def test_bergr_agent_env_wins_over_window_name(self):
+    def test_berger_agent_env_wins_over_window_name(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "somewindow")
             sb.event(hook_payload("Stop"), session="prj", window="somewindow", agent="impl")
             self.assertTrue(sb.wait_for_state("prj", "impl"))
             self.assertIsNone(sb.state("prj", "somewindow"))
 
-    def test_bergr_agent_env_suffix_is_stripped(self):
+    def test_berger_agent_env_suffix_is_stripped(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "somewindow")
             sb.event(hook_payload("Stop"), session="prj", window="somewindow", agent="impl!")
             self.assertTrue(sb.wait_for_state("prj", "impl"))
 
-    def test_empty_bergr_agent_falls_back_to_window_name(self):
+    def test_empty_berger_agent_falls_back_to_window_name(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl", agent="")
             self.assertTrue(sb.wait_for_state("prj", "impl"))
 
-    def test_no_bergr_agent_uses_window_name(self):
+    def test_no_berger_agent_uses_window_name(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl")
@@ -158,7 +158,7 @@ class SmokeIsolation(unittest.TestCase):
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl", agent="ghost")
             self.assertTrue(sb.wait_for_state("prj", "ghost"))
-            # the live window is renamed by BERGR_AGENT's name, not the window's own
+            # the live window is renamed by BERGER_AGENT's name, not the window's own
             # prior name -- "impl" becomes "ghost✓", not "impl✓".
             self.assertEqual(sb.windows("prj"), ["ghost✓"])
 
@@ -174,27 +174,27 @@ class SmokeSync(unittest.TestCase):
             sb.event(hook_payload("Stop"), session="prj", window="impl")
             sb.wait_for_window("prj", "impl✓")
             sb.rename_window("prj", "impl✓", "impl")  # mangle back to bare name
-            r = sb.run_bergr("sync", "--session", "prj")
+            r = sb.run_berger("sync", "--session", "prj")
             self.assertEqual(r.returncode, 0)
             self.assertEqual(sb.windows("prj"), ["impl✓"])
 
     def test_sync_on_session_with_no_state_dir_is_a_noop(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
-            r = sb.run_bergr("sync", "--session", "prj")
+            r = sb.run_berger("sync", "--session", "prj")
             self.assertEqual(r.returncode, 0)
             self.assertEqual(sb.windows("prj"), ["impl"])
 
     def test_sync_missing_session_flag_exits_1(self):
         with TmuxSandbox() as sb:
-            r = sb.run_bergr("sync")
+            r = sb.run_berger("sync")
             self.assertEqual(r.returncode, 1)
             self.assertIn("--session", r.stderr)
 
     def test_sync_nonexistent_session_exits_1(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")  # starts the server, but not "ghost-session"
-            r = sb.run_bergr("sync", "--session", "ghost-session")
+            r = sb.run_berger("sync", "--session", "ghost-session")
             self.assertEqual(r.returncode, 1)
 
     def test_sync_is_idempotent(self):
@@ -202,9 +202,9 @@ class SmokeSync(unittest.TestCase):
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl")
             sb.wait_for_window("prj", "impl✓")
-            sb.run_bergr("sync", "--session", "prj")
+            sb.run_berger("sync", "--session", "prj")
             before = sb.windows("prj")
-            sb.run_bergr("sync", "--session", "prj")
+            sb.run_berger("sync", "--session", "prj")
             self.assertEqual(sb.windows("prj"), before)
 
 
@@ -248,7 +248,7 @@ class SmokeRobustness(unittest.TestCase):
         # call would hit the actual default server. Point the shim at a dead
         # socket instead: every tmux call then fails -> None -> no-op.
         with TmuxSandbox(dead=True) as sb:
-            r = sb.run_bergr("event", stdin=hook_payload("Stop"))
+            r = sb.run_berger("event", stdin=hook_payload("Stop"))
             self.assertEqual(r.returncode, 0)
             self.assertEqual(r.stdout, "")
 
@@ -258,7 +258,7 @@ class SmokeRobustness(unittest.TestCase):
             weird = "a; rm -rf /tmp/nope && echo $(whoami) `id`"
             sb.event(hook_payload("Stop"), session="prj", window="impl", agent=weird)
             self.assertTrue(sb.wait_for_state("prj", weird))
-            # The window is renamed to this literal string (BERGR_AGENT + symbol),
+            # The window is renamed to this literal string (BERGER_AGENT + symbol),
             # never shell-interpreted -- had `$(whoami)`/backticks been expanded by a
             # shell along the way, this exact string would not survive as a window
             # name. That round-trip is what proves no shell execution occurred.
@@ -268,10 +268,10 @@ class SmokeRobustness(unittest.TestCase):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
             # A field value chosen by whatever the hook payload's source
-            # controls (e.g. a prompt or tool-input string), not by bergr or
+            # controls (e.g. a prompt or tool-input string), not by berger or
             # the test harness. If this were shell-interpolated on the way to
-            # `bergr event`'s stdin, `$(...)` would execute and `touch` would
-            # run before bergr ever saw the JSON.
+            # `berger event`'s stdin, `$(...)` would execute and `touch` would
+            # run before berger ever saw the JSON.
             marker = os.path.join(sb._tmpdir, "should-not-exist")
             payload = hook_payload("Stop", prompt=f"$(touch {marker}) `id` $HOME")
             sb.event(payload, session="prj", window="impl", agent="impl")
@@ -289,31 +289,31 @@ class SmokeRobustness(unittest.TestCase):
 # F. init (fake HOME)
 # ---------------------------------------------------------------------------
 
-def _copy_bergr_outside_target(dest_dir):
+def _copy_berger_outside_target(dest_dir):
     """init refuses to run from a path containing 'target/'. Copy the built
     binary to a tmpdir so init's happy path can be exercised."""
-    dest = os.path.join(dest_dir, "bergr")
-    shutil.copy2(BERGR_BIN, dest)
+    dest = os.path.join(dest_dir, "berger")
+    shutil.copy2(BERGER_BIN, dest)
     os.chmod(dest, 0o755)
     return dest
 
 
 class SmokeInit(unittest.TestCase):
-    def _run_init(self, sb, bergr_bin):
+    def _run_init(self, sb, berger_bin):
         env = dict(os.environ)
         env["HOME"] = sb.home
         env["XDG_CACHE_HOME"] = sb.xdg_cache
         env.pop("XDG_CONFIG_HOME", None)
-        return subprocess.run([bergr_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
+        return subprocess.run([berger_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
 
     def test_migrates_amux_hooks_and_keeps_unrelated_ones(self):
         with TmuxSandbox() as sb:
             claude_dir = os.path.join(sb.home, ".claude")
             os.makedirs(claude_dir, exist_ok=True)
             shutil.copy2(FIXTURE_SETTINGS, os.path.join(claude_dir, "settings.json"))
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
 
-            r = self._run_init(sb, bergr_bin)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
 
             with open(os.path.join(claude_dir, "settings.json")) as f:
@@ -330,8 +330,8 @@ class SmokeInit(unittest.TestCase):
                     any("amux" in c for c in commands),
                     f"amux entry survived in {event}: {commands}",
                 )
-                bergr_entries = [c for c in commands if c.endswith(" event") and "bergr" in c]
-                self.assertEqual(len(bergr_entries), 1, f"{event}: {commands}")
+                berger_entries = [c for c in commands if c.endswith(" event") and "berger" in c]
+                self.assertEqual(len(berger_entries), 1, f"{event}: {commands}")
 
             pre_tool_use_cmds = [
                 h.get("command", "")
@@ -349,11 +349,11 @@ class SmokeInit(unittest.TestCase):
             shutil.copy2(FIXTURE_SETTINGS, settings_path)
             with open(FIXTURE_SETTINGS, "rb") as f:
                 original_bytes = f.read()
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
 
-            self._run_init(sb, bergr_bin)
+            self._run_init(sb, berger_bin)
 
-            backup_path = settings_path[: -len(".json")] + ".json.bergr-bak"
+            backup_path = settings_path[: -len(".json")] + ".json.berger-bak"
             self.assertTrue(os.path.exists(backup_path))
             with open(backup_path, "rb") as f:
                 self.assertEqual(f.read(), original_bytes)
@@ -364,16 +364,16 @@ class SmokeInit(unittest.TestCase):
             os.makedirs(claude_dir, exist_ok=True)
             settings_path = os.path.join(claude_dir, "settings.json")
             shutil.copy2(FIXTURE_SETTINGS, settings_path)
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
 
-            self._run_init(sb, bergr_bin)
-            backup_path = settings_path[: -len(".json")] + ".json.bergr-bak"
+            self._run_init(sb, berger_bin)
+            backup_path = settings_path[: -len(".json")] + ".json.berger-bak"
             with open(backup_path) as f:
                 backup_after_first = f.read()
 
             with open(settings_path) as f:
                 after_first = json.load(f)
-            r2 = self._run_init(sb, bergr_bin)
+            r2 = self._run_init(sb, berger_bin)
             self.assertEqual(r2.returncode, 0, r2.stderr)
             with open(settings_path) as f:
                 after_second = json.load(f)
@@ -385,42 +385,42 @@ class SmokeInit(unittest.TestCase):
     def test_tmux_conf_contents(self):
         with TmuxSandbox() as sb:
             os.makedirs(os.path.join(sb.home, ".claude"), exist_ok=True)
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
-            r = self._run_init(sb, bergr_bin)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
-            conf_path = os.path.join(sb.home, ".config", "bergr", "tmux.conf")
+            conf_path = os.path.join(sb.home, ".config", "berger", "tmux.conf")
             with open(conf_path) as f:
                 conf = f.read()
             self.assertIn("allow-rename off", conf)
             self.assertIn("automatic-rename off", conf)
             self.assertIn("bind-key M", conf)
-            self.assertIn(f"'{bergr_bin}' sync --session", conf)
+            self.assertIn(f"'{berger_bin}' sync --session", conf)
 
     def test_init_without_preexisting_settings_still_succeeds(self):
         with TmuxSandbox() as sb:
             os.makedirs(os.path.join(sb.home, ".claude"), exist_ok=True)
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
-            r = self._run_init(sb, bergr_bin)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
             settings_path = os.path.join(sb.home, ".claude", "settings.json")
             self.assertTrue(os.path.exists(settings_path))
 
     def test_init_creates_claude_dir_when_entirely_absent(self):
         # Regression test: init.rs now create_dir_all's ~/.claude before
-        # writing settings.json (it already did this for ~/.config/bergr).
+        # writing settings.json (it already did this for ~/.config/berger).
         # On a machine that has never run Claude Code -- no ~/.claude at all
-        # -- `bergr init` must create it rather than failing with ENOENT.
+        # -- `berger init` must create it rather than failing with ENOENT.
         with TmuxSandbox() as sb:
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
-            r = self._run_init(sb, bergr_bin)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
             settings_path = os.path.join(sb.home, ".claude", "settings.json")
             self.assertTrue(os.path.exists(settings_path))
 
     def test_refuses_to_run_from_target_dir(self):
         with TmuxSandbox() as sb:
-            # BERGR_BIN itself lives under target/debug -- exactly the guarded case.
-            r = self._run_init(sb, BERGR_BIN)
+            # BERGER_BIN itself lives under target/debug -- exactly the guarded case.
+            r = self._run_init(sb, BERGER_BIN)
             self.assertEqual(r.returncode, 1)
             self.assertIn("target", r.stderr.lower())
 
@@ -430,8 +430,8 @@ class SmokeInit(unittest.TestCase):
             os.makedirs(claude_dir, exist_ok=True)
             with open(os.path.join(claude_dir, "settings.json"), "w") as f:
                 f.write("{not valid json")
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
-            r = self._run_init(sb, bergr_bin)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 1)
             self.assertIn("not valid JSON", r.stderr)
 
@@ -445,8 +445,8 @@ class SmokeInit(unittest.TestCase):
             os.makedirs(claude_dir, exist_ok=True)
             with open(os.path.join(claude_dir, "settings.json"), "w") as f:
                 json.dump({"hooks": []}, f)
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
-            r = self._run_init(sb, bergr_bin)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 1)
             self.assertNotIn("panicked", r.stderr.lower())
             self.assertIn("unexpected shape", r.stderr.lower())
@@ -462,14 +462,14 @@ class SmokeReset(unittest.TestCase):
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl")
             sb.wait_for_state("prj", "impl")
-            self.assertTrue(os.path.exists(os.path.join(sb.xdg_cache, "bergr")))
-            r = sb.run_bergr("reset")
+            self.assertTrue(os.path.exists(os.path.join(sb.xdg_cache, "berger")))
+            r = sb.run_berger("reset")
             self.assertEqual(r.returncode, 0)
-            self.assertFalse(os.path.exists(os.path.join(sb.xdg_cache, "bergr")))
+            self.assertFalse(os.path.exists(os.path.join(sb.xdg_cache, "berger")))
 
     def test_reset_with_nothing_to_remove_still_exits_0(self):
         with TmuxSandbox() as sb:
-            r = sb.run_bergr("reset")
+            r = sb.run_berger("reset")
             self.assertEqual(r.returncode, 0)
 
 
@@ -477,7 +477,7 @@ class SmokeReset(unittest.TestCase):
 # H. Opt-in real `claude` end-to-end
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(os.environ.get("BERGR_TEST_REAL_CLAUDE") == "1", "set BERGR_TEST_REAL_CLAUDE=1 to run")
+@unittest.skipUnless(os.environ.get("BERGER_TEST_REAL_CLAUDE") == "1", "set BERGER_TEST_REAL_CLAUDE=1 to run")
 class SmokeRealClaude(unittest.TestCase):
     def test_real_claude_session_triggers_hooks_via_settings_json(self):
         claude_bin = shutil.which("claude")
@@ -485,12 +485,12 @@ class SmokeRealClaude(unittest.TestCase):
             self.skipTest("claude not found on PATH")
 
         with TmuxSandbox() as sb:
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
             init_env = dict(os.environ)
             init_env["HOME"] = sb.home
             init_env["XDG_CACHE_HOME"] = sb.xdg_cache
             init_env.pop("XDG_CONFIG_HOME", None)
-            r = subprocess.run([bergr_bin, "init"], capture_output=True, text=True, env=init_env, timeout=10)
+            r = subprocess.run([berger_bin, "init"], capture_output=True, text=True, env=init_env, timeout=10)
             self.assertEqual(r.returncode, 0, r.stderr)
 
             sb.new_session("prj", "impl")
@@ -549,26 +549,26 @@ class SmokeConcurrency(unittest.TestCase):
 class SmokeCli(unittest.TestCase):
     def test_bare_command_exits_1_with_usage(self):
         with TmuxSandbox() as sb:
-            r = sb.run_bergr()
+            r = sb.run_berger()
             self.assertEqual(r.returncode, 1)
-            self.assertIn("usage: bergr", r.stderr)
+            self.assertIn("usage: berger", r.stderr)
 
     def test_unknown_subcommand_exits_1(self):
         with TmuxSandbox() as sb:
-            r = sb.run_bergr("frobnicate")
+            r = sb.run_berger("frobnicate")
             self.assertEqual(r.returncode, 1)
             self.assertIn("unknown command 'frobnicate'", r.stderr)
-            self.assertIn("usage: bergr", r.stderr)
+            self.assertIn("usage: berger", r.stderr)
 
     def test_sync_unknown_flag_exits_1(self):
         with TmuxSandbox() as sb:
-            r = sb.run_bergr("sync", "--session", "prj", "--force")
+            r = sb.run_berger("sync", "--session", "prj", "--force")
             self.assertEqual(r.returncode, 1)
             self.assertIn("unknown argument '--force'", r.stderr)
 
     def test_sync_session_flag_with_no_value_exits_1(self):
         with TmuxSandbox() as sb:
-            r = sb.run_bergr("sync", "--session")
+            r = sb.run_berger("sync", "--session")
             self.assertEqual(r.returncode, 1)
             self.assertIn("--session <name> is required", r.stderr)
 
@@ -622,7 +622,7 @@ class SmokeAgentSwitch(unittest.TestCase):
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl", agent="feature/foo")
             self.assertTrue(sb.wait_for_state("prj", "feature/foo"))
-            state_dir = os.path.join(sb.xdg_cache, "bergr", "prj")
+            state_dir = os.path.join(sb.xdg_cache, "berger", "prj")
             self.assertEqual(os.listdir(state_dir), ["feature%2ffoo.state"])
 
 
@@ -641,7 +641,7 @@ class SmokeSyncRepair(unittest.TestCase):
             sb.wait_for_window("prj", "plan!")
             sb.rename_window("prj", "impl✓", "impl")
             sb.rename_window("prj", "plan!", "plan")
-            r = sb.run_bergr("sync", "--session", "prj")
+            r = sb.run_berger("sync", "--session", "prj")
             self.assertEqual(r.returncode, 0)
             self.assertEqual(set(sb.windows("prj")), {"impl✓", "plan!"})
 
@@ -652,7 +652,7 @@ class SmokeSyncRepair(unittest.TestCase):
             sb.event(hook_payload("Stop"), session="prj", window="plan", agent="plan")
             self.assertTrue(sb.wait_for_state("prj", "plan"))
             _real_tmux_kill_window(sb, "prj", "plan")
-            r = sb.run_bergr("sync", "--session", "prj")
+            r = sb.run_berger("sync", "--session", "prj")
             self.assertEqual(r.returncode, 0)
             self.assertTrue(sb.wait_for_no_state("prj", "plan"))
 
@@ -667,12 +667,12 @@ def _real_tmux_kill_window(sb, session, window):
 # ---------------------------------------------------------------------------
 
 class SmokeInitTmuxConfMigration(unittest.TestCase):
-    def _run_init(self, sb, bergr_bin):
+    def _run_init(self, sb, berger_bin):
         env = dict(os.environ)
         env["HOME"] = sb.home
         env["XDG_CACHE_HOME"] = sb.xdg_cache
         env.pop("XDG_CONFIG_HOME", None)
-        return subprocess.run([bergr_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
+        return subprocess.run([berger_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
 
     def test_removes_stale_amux_source_line_from_user_tmux_conf(self):
         with TmuxSandbox() as sb:
@@ -681,9 +681,9 @@ class SmokeInitTmuxConfMigration(unittest.TestCase):
             user_conf = os.path.join(sb.home, ".tmux.conf")
             with open(user_conf, "w") as f:
                 f.write(f'set -g mouse on\nsource-file "{amux_conf}"\nset -g history-limit 5000\n')
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
 
-            r = self._run_init(sb, bergr_bin)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
 
             with open(user_conf) as f:
@@ -691,7 +691,7 @@ class SmokeInitTmuxConfMigration(unittest.TestCase):
             self.assertNotIn("amux", contents)
             self.assertIn("history-limit 5000", contents)
 
-            backup_path = user_conf[: -len(".conf")] + ".conf.bergr-bak"
+            backup_path = user_conf[: -len(".conf")] + ".conf.berger-bak"
             self.assertTrue(os.path.exists(backup_path))
 
     def test_leaves_user_tmux_conf_untouched_when_not_sourcing_amux(self):
@@ -700,14 +700,14 @@ class SmokeInitTmuxConfMigration(unittest.TestCase):
             user_conf = os.path.join(sb.home, ".tmux.conf")
             with open(user_conf, "w") as f:
                 f.write("set -g mouse on\n")
-            bergr_bin = _copy_bergr_outside_target(sb._tmpdir)
+            berger_bin = _copy_berger_outside_target(sb._tmpdir)
 
-            r = self._run_init(sb, bergr_bin)
+            r = self._run_init(sb, berger_bin)
             self.assertEqual(r.returncode, 0, r.stderr)
 
             with open(user_conf) as f:
                 self.assertEqual(f.read(), "set -g mouse on\n")
-            backup_path = user_conf[: -len(".conf")] + ".conf.bergr-bak"
+            backup_path = user_conf[: -len(".conf")] + ".conf.berger-bak"
             self.assertFalse(os.path.exists(backup_path))
 
 
@@ -722,13 +722,13 @@ class SmokeResetLegacy(unittest.TestCase):
             os.makedirs(os.path.join(amux_cache, "prj"), exist_ok=True)
             with open(os.path.join(amux_cache, "prj", "watch.pid"), "w") as f:
                 f.write("12345")
-            r = sb.run_bergr("reset")
+            r = sb.run_berger("reset")
             self.assertEqual(r.returncode, 0)
             self.assertFalse(os.path.exists(amux_cache))
 
 
 if __name__ == "__main__":
-    if not os.path.exists(BERGR_BIN):
-        print(f"error: bergr binary not found at {BERGR_BIN} -- run `cargo build` first", file=sys.stderr)
+    if not os.path.exists(BERGER_BIN):
+        print(f"error: berger binary not found at {BERGER_BIN} -- run `cargo build` first", file=sys.stderr)
         sys.exit(1)
     unittest.main()
