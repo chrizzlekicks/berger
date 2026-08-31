@@ -1,5 +1,6 @@
 use crate::fs_util::encode_session_component;
-use crate::reconcile::{plan_renames, window_matches_record};
+use crate::name::strip_suffix;
+use crate::reconcile::{agent_matches, plan_renames, window_matches_record};
 use crate::state::{self, cache_root};
 use crate::tmux::{self, Window};
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ pub fn run(session: &str) {
     // window_id match can't be verified — better to skip this pass than risk
     // treating live windows as orphaned because of a transient tmux hiccup.
     if let Some(pid) = server_pid.as_deref() {
-        prune_orphaned(&records, &windows, Some(pid));
+        prune_orphaned(session, &records, &windows, Some(pid));
     }
 }
 
@@ -51,17 +52,51 @@ pub fn run(session: &str) {
 /// other place state gets cleaned up. Prunes by the path each record was actually
 /// read from, not a recomputed one, so a name/agent mismatch can't leave orphans
 /// stuck forever.
+///
+/// A record surviving a tmux server restart (its `server_pid` disagrees with
+/// `current_server_pid`) is always orphaned — `window_matches_record` no longer
+/// trusts a same-named window as proof of identity, since the agent process
+/// behind the old record didn't survive the restart. But its window may still be
+/// visibly stuck with a stale suffix from before the restart; rather than
+/// reapplying the old (now-unverifiable) state, this clears that suffix back to
+/// the window's base name so it doesn't stay stuck forever.
 fn prune_orphaned(
+    session: &str,
     records: &[(PathBuf, state::StateRecord)],
     windows: &[Window],
     current_server_pid: Option<&str>,
 ) {
     for (path, record) in records {
-        if is_orphaned(record, windows, current_server_pid)
-            && let Err(e) = state::remove_state_file(path)
+        if !is_orphaned(record, windows, current_server_pid) {
+            continue;
+        }
+        if survived_a_restart(record, current_server_pid)
+            && let Some(window) = windows
+                .iter()
+                .find(|w| agent_matches(&w.name, &record.agent))
         {
+            let base = strip_suffix(&window.name);
+            if base != window.name && !tmux::rename_window(session, &window.index, &base) {
+                eprintln!(
+                    "berger sync: failed clearing stale suffix on window {}",
+                    window.index
+                );
+            }
+        }
+        if let Err(e) = state::remove_state_file(path) {
             eprintln!("berger sync: failed removing {}: {e}", path.display());
         }
+    }
+}
+
+/// True when `record` names a window_id/server_pid pair that can no longer be
+/// verified against the running server — i.e. it predates a tmux restart, rather
+/// than referring to a window that was simply closed.
+fn survived_a_restart(record: &state::StateRecord, current_server_pid: Option<&str>) -> bool {
+    match (&record.server_pid, current_server_pid) {
+        (Some(recorded), Some(current)) => recorded != current,
+        (Some(_), None) => true,
+        (None, _) => false,
     }
 }
 
@@ -182,8 +217,57 @@ mod tests {
         .unwrap();
 
         let records = vec![(path.clone(), record("impl"))];
-        prune_orphaned(&records, &[], None);
+        prune_orphaned("s", &records, &[], None);
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn prune_deletes_record_that_survived_a_restart_even_if_a_same_named_window_exists() {
+        // A same-named live window is not proof of identity across a restart, so
+        // this must still be pruned — the rename attempt below has no real tmux
+        // server to talk to and will fail, but that must not block the delete.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("impl.state");
+        std::fs::write(
+            &path,
+            "agent=impl\nstate=approval\nharness=claude\nsession=s\n",
+        )
+        .unwrap();
+
+        let mut stale = record_with_window_id("impl", "@1");
+        stale.server_pid = Some("111".to_string());
+        let records = vec![(path.clone(), stale)];
+        let windows = [window("@1", "impl!")];
+
+        prune_orphaned("s", &records, &windows, Some("222"));
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn survived_a_restart_true_when_server_pid_disagrees() {
+        let mut stale = record_with_window_id("impl", "@1");
+        stale.server_pid = Some("111".to_string());
+        assert!(survived_a_restart(&stale, Some("222")));
+    }
+
+    #[test]
+    fn survived_a_restart_true_when_current_pid_unreadable() {
+        let mut stale = record_with_window_id("impl", "@1");
+        stale.server_pid = Some("111".to_string());
+        assert!(survived_a_restart(&stale, None));
+    }
+
+    #[test]
+    fn survived_a_restart_false_when_record_has_no_server_pid() {
+        assert!(!survived_a_restart(&record("impl"), Some("222")));
+    }
+
+    #[test]
+    fn survived_a_restart_false_when_pid_agrees() {
+        let mut current = record_with_window_id("impl", "@1");
+        current.server_pid = Some("111".to_string());
+        assert!(!survived_a_restart(&current, Some("111")));
     }
 }

@@ -30,14 +30,15 @@ pub struct Rename {
 /// a since-closed window.
 ///
 /// When the pid agrees, the id is trustworthy on this server: a mismatched id
-/// means the record genuinely belongs to a different, still-existing window, so
-/// this must not fall back to name matching — that would risk pairing it with an
-/// unrelated window that happens to share a stripped name. But when the pid
-/// disagrees (or can't be read), the id can't be verified at all, so this falls
-/// back to the same name-based check used for records with no `window_id` —
-/// matching amux, which always matched by stripped window name and had no
-/// identity check at all. Without this fallback, a window surviving a tmux
-/// restart would never regain its last known state.
+/// means the record genuinely belongs to a different, still-existing window. When
+/// the pid disagrees (or can't be read), the id can't be verified at all — this is
+/// a non-match, not a fallback to name matching. A same-named live window is not
+/// proof it's the same window: the agent process behind the old record did not
+/// survive the restart, so reapplying its state would be a lie, and treating the
+/// name as identity risks pairing an unrelated new window with a stale record
+/// forever (see `sync::is_orphaned`, which prunes these records rather than
+/// keeping them alive). Recovering a stuck suffix after a restart is handled
+/// separately, by clearing rather than restoring — see `sync::prune_orphaned`.
 ///
 /// Shared by `plan_renames` (below) and `event`'s `SessionEnd` handler, so both
 /// agree on how a window's record is identified rather than by re-deriving a path
@@ -50,7 +51,7 @@ pub fn window_matches_record(
     match &record.window_id {
         Some(id) => match &record.server_pid {
             Some(recorded) if current_server_pid == Some(recorded.as_str()) => &window.id == id,
-            Some(_) => agent_matches(&window.name, &record.agent),
+            Some(_) => false,
             None => &window.id == id,
         },
         None => agent_matches(&window.name, &record.agent),
@@ -221,43 +222,32 @@ mod tests {
     }
 
     #[test]
-    fn window_id_match_falls_back_to_name_when_server_pid_disagrees() {
+    fn window_id_match_is_rejected_when_server_pid_disagrees() {
         // A fresh tmux server hands out window ids starting from @0 again, so
         // after a restart a live window can carry an id a stale record (from the
         // previous server) also used. A mismatched server_pid means the id can't
-        // be trusted, so this falls back to matching by stripped name — the same
-        // recovery amux always relied on — rather than leaving the window stuck
-        // with no suffix until a fresh event arrives.
+        // be trusted, and a same-named live window is not proof it's the same
+        // window — the old agent process didn't survive the restart, so this must
+        // not fall back to name matching (that's how a stale record could apply
+        // its state to an unrelated new window forever). Recovery happens
+        // separately, via prune clearing the stuck suffix rather than restoring it.
         let mut stale = record("impl", State::Approval);
         stale.window_id = Some("@1".to_string());
         stale.server_pid = Some("111".to_string());
         let windows = vec![window("1", "impl")];
-        assert_eq!(
-            plan_renames(&[stale], &windows, Some("222")),
-            vec![Rename {
-                index: "1".to_string(),
-                new_name: "impl!".to_string()
-            }]
-        );
+        assert!(plan_renames(&[stale], &windows, Some("222")).is_empty());
     }
 
     #[test]
-    fn window_id_match_falls_back_to_name_when_current_server_pid_unreadable() {
+    fn window_id_match_is_rejected_when_current_server_pid_unreadable() {
         // The record has a server_pid, but the current one couldn't be read
-        // (tmux::server_pid() failed). Unable to verify the id is trustworthy,
-        // so this falls back to name matching rather than leaving the window
-        // stuck with a stale suffix.
+        // (tmux::server_pid() failed). Unable to verify the id is trustworthy, so
+        // this is a non-match rather than a fallback to name matching.
         let mut stale = record("impl", State::Approval);
         stale.window_id = Some("@1".to_string());
         stale.server_pid = Some("111".to_string());
         let windows = vec![window("1", "impl")];
-        assert_eq!(
-            plan_renames(&[stale], &windows, None),
-            vec![Rename {
-                index: "1".to_string(),
-                new_name: "impl!".to_string()
-            }]
-        );
+        assert!(plan_renames(&[stale], &windows, None).is_empty());
     }
 
     #[test]
