@@ -34,7 +34,8 @@ fn resolve_agent(window_name: Option<&str>) -> String {
 }
 
 /// Runs the `event` command: reads a hook payload from stdin, updates state, and
-/// renames the current window.
+/// renames the window that owns `$TMUX_PANE` — the pane the hook actually ran
+/// in, not necessarily the client's focused window.
 ///
 /// Never fails outward — every error is logged and treated as a no-op, since this
 /// sits on Claude Code's hook path where a non-zero exit could block a tool call.
@@ -59,12 +60,12 @@ pub fn run() {
         return;
     };
     // Read once, up front, and reuse everywhere below (agent resolution, stale-
-    // record lookup, rename target) — a second concurrent `berger event` can
-    // change the server's active window at any moment, so separate ambient
-    // reads (each its own ad hoc `tmux display-message`) can each resolve to a
+    // record lookup, rename target) — a second concurrent `berger event` could
+    // run for a different pane at any moment, so separate ambient reads (each
+    // its own ad hoc `tmux display-message`) could each resolve to a
     // *different* window than the others, mixing one invocation's agent name
     // with another's window id.
-    let window = current_window(&session);
+    let window = pane_window(&session);
     let agent = resolve_agent(window.as_ref().map(|w| w.name.as_str()));
 
     match state::state_for_event(&payload.hook_event_name) {
@@ -101,7 +102,7 @@ pub fn run() {
                 eprintln!("berger event: failed deleting {}: {e}", path.display());
                 return;
             }
-            rename_current_window(&window.id, &base);
+            rename_window(&window.id, &base);
         }
         Some(new_state) => {
             let path = match state::state_path(&session, &agent) {
@@ -130,23 +131,25 @@ pub fn run() {
                 return;
             }
             if let Some(w) = &window {
-                rename_current_window(&w.id, &new_name);
+                rename_window(&w.id, &new_name);
             }
         }
     }
 }
 
-/// The current tmux window as a `tmux::Window`, or `None` if any of its id, index,
-/// or name can't be read (e.g. not inside tmux), or the id no longer matches
-/// any window in `session` (closed between the two reads below).
+/// The window that owns `$TMUX_PANE` (see `tmux::pane_window_id`) as a
+/// `tmux::Window` — not the client's focused window, which the hook's pane may
+/// not be in — or `None` if any of its id, index, or name can't be read (e.g.
+/// not inside tmux), or the id no longer matches any window in `session`
+/// (closed between the two reads below).
 ///
-/// Reads the id via one ambient `display-message`, then looks up index/name
-/// for that id via `list_windows` rather than two more ambient reads — one
-/// batch call returns every window's id/index/name from a single tmux
-/// snapshot, so they can't individually resolve to different windows the way
-/// three separate `display-message` calls could.
-fn current_window(session: &str) -> Option<Window> {
-    let id = tmux::current_window_id()?;
+/// Reads the id via one pane-targeted `display-message`, then looks up
+/// index/name for that id via `list_windows` rather than two more ambient
+/// reads — one batch call returns every window's id/index/name from a single
+/// tmux snapshot, so they can't individually resolve to different windows the
+/// way three separate `display-message` calls could.
+fn pane_window(session: &str) -> Option<Window> {
+    let id = tmux::pane_window_id()?;
     tmux::list_windows(session)?
         .into_iter()
         .find(|w| w.id == id)
@@ -215,10 +218,10 @@ fn remove_stale_record_in_dir(
 
 /// Renames `window` by its stable id, not by matching `agent` against window
 /// names (breaks when `BERGER_AGENT` diverges from the window name) and not by
-/// re-querying the live index (races: the active window can change between
-/// the caller's earlier lookup and a fresh index query here, renaming whatever
-/// window happens to be active at that later moment instead of `window`).
-fn rename_current_window(window_id: &str, new_name: &str) {
+/// re-resolving the pane's window via a fresh query here (races: which window
+/// owns `$TMUX_PANE` can't change mid-hook, but re-querying would still be a
+/// second, separately-timed tmux call — use the id the caller already has).
+fn rename_window(window_id: &str, new_name: &str) {
     if !tmux::rename_window_by_id(window_id, new_name) {
         eprintln!("berger event: failed to rename window {window_id} to '{new_name}'");
     }
