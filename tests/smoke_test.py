@@ -306,11 +306,13 @@ class SmokeInit(unittest.TestCase):
         env.pop("XDG_CONFIG_HOME", None)
         return subprocess.run([berger_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
 
-    def test_migrates_amux_hooks_and_keeps_unrelated_ones(self):
+    def test_preserves_amux_hooks_and_keeps_unrelated_ones(self):
         with TmuxSandbox() as sb:
             claude_dir = os.path.join(sb.home, ".claude")
             os.makedirs(claude_dir, exist_ok=True)
             shutil.copy2(FIXTURE_SETTINGS, os.path.join(claude_dir, "settings.json"))
+            with open(os.path.join(claude_dir, "settings.json")) as f:
+                original = json.load(f)
             berger_bin = _copy_berger_outside_target(sb._tmpdir)
 
             r = self._run_init(sb, berger_bin)
@@ -326,10 +328,15 @@ class SmokeInit(unittest.TestCase):
                     for e in entries
                     for h in e.get("hooks", [])
                 ]
-                self.assertFalse(
-                    any("amux" in c for c in commands),
-                    f"amux entry survived in {event}: {commands}",
-                )
+                original_amux = [
+                    e for e in original["hooks"].get(event, [])
+                    if any("amux" in h.get("command", "") for h in e.get("hooks", []))
+                ]
+                actual_amux = [
+                    e for e in entries
+                    if any("amux" in h.get("command", "") for h in e.get("hooks", []))
+                ]
+                self.assertEqual(actual_amux, original_amux)
                 berger_entries = [c for c in commands if c.endswith(" event") and "berger" in c]
                 self.assertEqual(len(berger_entries), 1, f"{event}: {commands}")
 
@@ -663,10 +670,10 @@ def _real_tmux_kill_window(sb, session, window):
 
 
 # ---------------------------------------------------------------------------
-# N. init: legacy amux ~/.tmux.conf source-line removal
+# N. init: amux ~/.tmux.conf non-interference
 # ---------------------------------------------------------------------------
 
-class SmokeInitTmuxConfMigration(unittest.TestCase):
+class SmokeInitTmuxConfPreservation(unittest.TestCase):
     def _run_init(self, sb, berger_bin):
         env = dict(os.environ)
         env["HOME"] = sb.home
@@ -674,13 +681,47 @@ class SmokeInitTmuxConfMigration(unittest.TestCase):
         env.pop("XDG_CONFIG_HOME", None)
         return subprocess.run([berger_bin, "init"], capture_output=True, text=True, env=env, timeout=10)
 
-    def test_removes_stale_amux_source_line_from_user_tmux_conf(self):
+    def test_does_not_warn_about_live_amux_watcher(self):
+        with TmuxSandbox() as sb:
+            os.makedirs(os.path.join(sb.home, ".claude"), exist_ok=True)
+            amux_cache = os.path.join(sb.xdg_cache, "amux", "prj")
+            os.makedirs(amux_cache, exist_ok=True)
+            watcher = subprocess.Popen(["bash", "-c", "exec -a 'amux watch' sleep 60"])
+            try:
+                ready = False
+                for _ in range(50):
+                    cmdline = subprocess.run(
+                        ["ps", "-o", "command=", "-p", str(watcher.pid)],
+                        capture_output=True, text=True, check=False,
+                    ).stdout
+                    words = cmdline.split()
+                    if len(words) >= 2 and os.path.basename(words[0]) == "amux" and words[1] == "watch":
+                        ready = True
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(ready, "watcher did not reach amux watch identity")
+                with open(os.path.join(amux_cache, "watch.pid"), "w") as f:
+                    f.write(str(watcher.pid))
+                berger_bin = _copy_berger_outside_target(sb._tmpdir)
+                r = self._run_init(sb, berger_bin)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("amux watcher", r.stderr.lower())
+            finally:
+                watcher.terminate()
+                watcher.wait()
+
+    def test_leaves_amux_source_line_in_user_tmux_conf(self):
         with TmuxSandbox() as sb:
             os.makedirs(os.path.join(sb.home, ".claude"), exist_ok=True)
             amux_conf = os.path.join(sb.home, ".config", "amux", "tmux.conf")
+            os.makedirs(os.path.dirname(amux_conf), exist_ok=True)
+            amux_contents = "# amux config\nset -g prefix C-a\n"
+            with open(amux_conf, "w") as f:
+                f.write(amux_contents)
             user_conf = os.path.join(sb.home, ".tmux.conf")
+            original_contents = f'set -g mouse on\nsource-file "{amux_conf}"\nset -g history-limit 5000\n'
             with open(user_conf, "w") as f:
-                f.write(f'set -g mouse on\nsource-file "{amux_conf}"\nset -g history-limit 5000\n')
+                f.write(original_contents)
             berger_bin = _copy_berger_outside_target(sb._tmpdir)
 
             r = self._run_init(sb, berger_bin)
@@ -688,11 +729,12 @@ class SmokeInitTmuxConfMigration(unittest.TestCase):
 
             with open(user_conf) as f:
                 contents = f.read()
-            self.assertNotIn("amux", contents)
-            self.assertIn("history-limit 5000", contents)
+            self.assertEqual(contents, original_contents)
 
             backup_path = user_conf[: -len(".conf")] + ".conf.berger-bak"
-            self.assertTrue(os.path.exists(backup_path))
+            self.assertFalse(os.path.exists(backup_path))
+            with open(amux_conf) as f:
+                self.assertEqual(f.read(), amux_contents)
 
     def test_leaves_user_tmux_conf_untouched_when_not_sourcing_amux(self):
         with TmuxSandbox() as sb:
@@ -712,19 +754,22 @@ class SmokeInitTmuxConfMigration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# O. reset: legacy amux cache removal
+# O. reset: amux cache preservation
 # ---------------------------------------------------------------------------
 
-class SmokeResetLegacy(unittest.TestCase):
-    def test_reset_removes_legacy_amux_cache_root(self):
+class SmokeResetAmuxPreservation(unittest.TestCase):
+    def test_reset_preserves_legacy_amux_cache_root(self):
         with TmuxSandbox() as sb:
             amux_cache = os.path.join(sb.xdg_cache, "amux")
             os.makedirs(os.path.join(amux_cache, "prj"), exist_ok=True)
+            pid_contents = "12345"
             with open(os.path.join(amux_cache, "prj", "watch.pid"), "w") as f:
-                f.write("12345")
+                f.write(pid_contents)
             r = sb.run_berger("reset")
             self.assertEqual(r.returncode, 0)
-            self.assertFalse(os.path.exists(amux_cache))
+            self.assertTrue(os.path.exists(amux_cache))
+            with open(os.path.join(amux_cache, "prj", "watch.pid")) as f:
+                self.assertEqual(f.read(), pid_contents)
 
 
 if __name__ == "__main__":
