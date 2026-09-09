@@ -76,7 +76,7 @@ error — `event` returns without doing anything tmux-related.
 # rename was missed or a window name drifted. Bound to prefix + M by init.
 berger sync --session myproject
 
-# Clear all runtime state (berger's own cache, plus any leftover amux cache)
+# Clear berger's runtime state
 berger reset
 ```
 
@@ -156,6 +156,4 @@ State files are plain key=value text — no JSON, no jq required.
 ## Migrating from amux
 
 Superseded by berger; the original bash prototype is kept in `legacy/` for
-reference. If an `amux watch` process is still running from before, `berger
-init` will warn and print the command to kill it — a live watcher would
-otherwise keep fighting berger's renames.
+reference. Berger does not modify amux configuration or runtime state.
