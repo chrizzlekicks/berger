@@ -68,9 +68,17 @@ pub fn run() {
     let window = pane_window(&session);
     let agent = resolve_agent(window.as_ref().map(|w| w.name.as_str()));
 
-    match state::state_for_event(&payload.hook_event_name) {
+    let harness = payload.harness.as_deref().unwrap_or("claude");
+    if harness != "claude" && harness != "pi" {
+        return;
+    }
+    let mapped = state::state_for_event(harness, &payload.hook_event_name, payload.is_error);
+    if harness == "pi" && mapped.is_none() && payload.hook_event_name != "session_shutdown" {
+        return;
+    }
+    match mapped {
         None => {
-            // SessionEnd (or an unrecognized event): clear state and strip any
+            // SessionEnd/session_shutdown: clear state and strip any
             // suffix from the window, rather than leaving it stale. This is the one
             // path where, with no watcher to notice the file vanish, berger itself
             // must actively clear the suffix.
@@ -120,7 +128,7 @@ pub fn run() {
                 agent: agent.clone(),
                 state: new_state,
                 updated_at: now_utc(),
-                harness: "claude".to_string(),
+                harness: harness.to_string(),
                 session: session.clone(),
                 window: new_name.clone(),
                 window_id: window.as_ref().map(|w| w.id.clone()),

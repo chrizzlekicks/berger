@@ -22,6 +22,15 @@ EVENT_TABLE = {
 
 ALL_EVENTS = list(EVENT_TABLE.keys())
 
+PI_EVENT_TABLE = {
+    "agent_start": ("working", ""),
+    "ui_prompt_start": ("approval", "!"),
+    "ui_prompt_end": ("working", ""),
+    "tool_execution_end": ("error", "✗"),
+    "agent_settled": ("done", "✓"),
+    "session_shutdown": (None, None),
+}
+
 
 def hook_payload(event_name, **extra):
     """Build the minimal JSON payload berger's HookPayload deserializer expects."""

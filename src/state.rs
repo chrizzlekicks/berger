@@ -39,15 +39,26 @@ impl fmt::Display for State {
     }
 }
 
-/// Maps a hook event name to the state it represents, or `None` if the event should
-/// clear state entirely (`SessionEnd`) or is unrecognized.
-pub fn state_for_event(hook_event_name: &str) -> Option<State> {
-    match hook_event_name {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(State::Working),
-        "PermissionRequest" => Some(State::Approval),
-        "PostToolUseFailure" | "StopFailure" => Some(State::Error),
-        "Stop" => Some(State::Done),
-        _ => None,
+/// Maps a harness event to its state. Callers distinguish explicit lifecycle
+/// cleanup events from ignored events before invoking this function.
+pub fn state_for_event(harness: &str, event: &str, is_error: Option<bool>) -> Option<State> {
+    match harness {
+        "pi" => match event {
+            "agent_start" | "ui_prompt_end" => Some(State::Working),
+            "ui_prompt_start" => Some(State::Approval),
+            "tool_execution_end" if is_error == Some(true) => Some(State::Error),
+            "agent_settled" => Some(State::Done),
+            "session_shutdown" => None,
+            _ => None,
+        },
+        _ => match event {
+            "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(State::Working),
+            "PermissionRequest" => Some(State::Approval),
+            "PostToolUseFailure" | "StopFailure" => Some(State::Error),
+            "Stop" => Some(State::Done),
+            "SessionEnd" => None,
+            _ => None,
+        },
     }
 }
 
@@ -315,23 +326,31 @@ mod tests {
 
     #[test]
     fn events_map_to_expected_states() {
-        assert_eq!(state_for_event("SessionStart"), Some(State::Working));
-        assert_eq!(state_for_event("UserPromptSubmit"), Some(State::Working));
-        assert_eq!(state_for_event("PreToolUse"), Some(State::Working));
-        assert_eq!(state_for_event("PermissionRequest"), Some(State::Approval));
-        assert_eq!(state_for_event("PostToolUseFailure"), Some(State::Error));
-        assert_eq!(state_for_event("StopFailure"), Some(State::Error));
-        assert_eq!(state_for_event("Stop"), Some(State::Done));
-    }
-
-    #[test]
-    fn session_end_clears_state() {
-        assert_eq!(state_for_event("SessionEnd"), None);
-    }
-
-    #[test]
-    fn unknown_event_is_none() {
-        assert_eq!(state_for_event("SomethingNew"), None);
+        for (harness, event, is_error, expected) in [
+            ("claude", "SessionStart", None, Some(State::Working)),
+            ("claude", "UserPromptSubmit", None, Some(State::Working)),
+            ("claude", "PreToolUse", None, Some(State::Working)),
+            ("claude", "PermissionRequest", None, Some(State::Approval)),
+            ("claude", "PostToolUseFailure", None, Some(State::Error)),
+            ("claude", "StopFailure", None, Some(State::Error)),
+            ("claude", "Stop", None, Some(State::Done)),
+            ("claude", "SessionEnd", None, None),
+            ("claude", "SomethingNew", None, None),
+            ("pi", "agent_start", None, Some(State::Working)),
+            ("pi", "ui_prompt_start", None, Some(State::Approval)),
+            ("pi", "ui_prompt_end", None, Some(State::Working)),
+            ("pi", "tool_execution_end", Some(true), Some(State::Error)),
+            ("pi", "tool_execution_end", Some(false), None),
+            ("pi", "agent_settled", None, Some(State::Done)),
+            ("pi", "session_shutdown", None, None),
+            ("pi", "future_event", None, None),
+        ] {
+            assert_eq!(
+                state_for_event(harness, event, is_error),
+                expected,
+                "{harness}:{event}"
+            );
+        }
     }
 
     #[test]

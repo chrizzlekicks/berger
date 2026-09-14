@@ -25,7 +25,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 
 from harness.sandbox import TmuxSandbox, BERGER_BIN
-from harness.payloads import hook_payload, suffixed, EVENT_TABLE, ALL_EVENTS
+from harness.payloads import hook_payload, suffixed, EVENT_TABLE, ALL_EVENTS, PI_EVENT_TABLE
 
 FIXTURE_SETTINGS = os.path.join(os.path.dirname(__file__), "fixtures", "settings.json")
 
@@ -233,7 +233,7 @@ class SmokeRobustness(unittest.TestCase):
             self.assertIn("malformed", out.lower())
             self.assertIsNone(sb.state("prj", "impl"))
 
-    def test_unknown_hook_event_name_clears_like_session_end(self):
+    def test_unknown_claude_event_preserves_legacy_cleanup_behavior(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl")
@@ -770,6 +770,143 @@ class SmokeResetAmuxPreservation(unittest.TestCase):
             self.assertTrue(os.path.exists(amux_cache))
             with open(os.path.join(amux_cache, "prj", "watch.pid")) as f:
                 self.assertEqual(f.read(), pid_contents)
+
+
+class SmokePiExtensionRuntime(unittest.TestCase):
+    def test_generated_extension_runtime(self):
+        if not shutil.which("node"):
+            self.skipTest("node unavailable")
+        with TmuxSandbox() as sb:
+            berger = _copy_berger_outside_target(sb._tmpdir)
+            r = subprocess.run([berger, "init", "--harness", "pi"], env={**os.environ, "HOME": sb.home, "XDG_CACHE_HOME": sb.xdg_cache}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ext = os.path.join(sb.home, ".pi/agent/extensions/berger.ts")
+            log = os.path.join(sb._tmpdir, "events.log")
+            os.unlink(berger)
+            with open(berger, "w") as f:
+                f.write("#!/bin/sh\ncat >> \"$LOG\"; echo >> \"$LOG\"\n")
+            os.chmod(berger, 0o755)
+            script = f'''import ext from {json.dumps(ext)}; const h={{}}; ext({{on:(n,f)=>h[n]=f}}); const ctx={{isIdle:()=>true}}; if (h.ui_prompt_start(null,ctx)!==undefined || h.ui_prompt_end(null,ctx)!==undefined) process.exit(2); if (h.agent_start(null)!==undefined || h.agent_settled(null)!==undefined) process.exit(3); await h.session_shutdown(null); await new Promise(r=>setTimeout(r,300));'''
+            env = {**os.environ, "LOG": log}
+            result = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script], env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(log) as f:
+                lines = f.read().splitlines()
+            self.assertEqual(
+                [json.loads(line)["hook_event_name"] for line in lines],
+                ["agent_start", "agent_settled", "session_shutdown"],
+            )
+            os.unlink(berger)
+            missing = subprocess.run(
+                ["node", "--experimental-strip-types", "--input-type=module", "-e",
+                 f"import ext from {json.dumps(ext)}; const h={{}}; ext({{on:(n,f)=>h[n]=f}}); h.agent_start(); await new Promise(r=>setTimeout(r,1100));"],
+                env={**os.environ, "LOG": log}, capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(missing.returncode, 0, missing.stderr)
+
+
+class SmokePiInitSelection(unittest.TestCase):
+    def _run_installed(self, sb, *args):
+        berger_bin = _copy_berger_outside_target(sb._tmpdir)
+        env = dict(os.environ, HOME=sb.home, XDG_CACHE_HOME=sb.xdg_cache)
+        env.pop("XDG_CONFIG_HOME", None)
+        return subprocess.run(
+            [berger_bin, "init", *args], capture_output=True, text=True, env=env, timeout=10
+        )
+
+    def test_invalid_harness_rejected(self):
+        with TmuxSandbox() as sb:
+            r = self._run_installed(sb, "--harness", "wat")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("claude or pi", r.stderr)
+
+    def test_default_and_explicit_claude_install_claude_hooks(self):
+        for args in ((), ("--harness", "claude")):
+            with self.subTest(args=args), TmuxSandbox() as sb:
+                r = self._run_installed(sb, *args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(os.path.exists(os.path.join(sb.home, ".claude", "settings.json")))
+                self.assertFalse(os.path.exists(os.path.join(sb.home, ".pi", "agent", "extensions", "berger.ts")))
+
+    def test_pi_init_is_idempotent_and_preserves_unrelated_files(self):
+        with TmuxSandbox() as sb:
+            extensions = os.path.join(sb.home, ".pi", "agent", "extensions")
+            os.makedirs(extensions, exist_ok=True)
+            unrelated = os.path.join(extensions, "mine.ts")
+            with open(unrelated, "w") as f:
+                f.write("export default () => {};\n")
+            self.assertEqual(self._run_installed(sb, "--harness", "pi").returncode, 0)
+            berger_extension = os.path.join(extensions, "berger.ts")
+            with open(berger_extension) as f:
+                once = f.read()
+            self.assertEqual(self._run_installed(sb, "--harness", "pi").returncode, 0)
+            with open(berger_extension) as f:
+                self.assertEqual(f.read(), once)
+            with open(unrelated) as f:
+                self.assertEqual(f.read(), "export default () => {};\n")
+            self.assertIn("ExtensionAPI", once)
+            self.assertIn("session_shutdown", once)
+
+    def test_pi_init_refuses_to_overwrite_unmanaged_berger_extension(self):
+        with TmuxSandbox() as sb:
+            path = os.path.join(sb.home, ".pi", "agent", "extensions", "berger.ts")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("// user-owned\n")
+            r = self._run_installed(sb, "--harness", "pi")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("refusing to overwrite", r.stderr)
+            with open(path) as f:
+                self.assertEqual(f.read(), "// user-owned\n")
+
+    def test_claude_and_pi_initialization_coexist(self):
+        with TmuxSandbox() as sb:
+            self.assertEqual(self._run_installed(sb).returncode, 0)
+            settings = os.path.join(sb.home, ".claude", "settings.json")
+            with open(settings) as f:
+                claude_before = json.load(f)
+            self.assertEqual(self._run_installed(sb, "--harness", "pi").returncode, 0)
+            with open(settings) as f:
+                self.assertEqual(json.load(f), claude_before)
+            self.assertTrue(os.path.exists(os.path.join(sb.home, ".pi", "agent", "extensions", "berger.ts")))
+
+
+class SmokePiEvents(unittest.TestCase):
+    def test_pi_lifecycle_and_cleanup(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            for event, (state, symbol) in PI_EVENT_TABLE.items():
+                extra = {"harness": "pi"}
+                if event == "tool_execution_end":
+                    extra["is_error"] = True
+                current = sb.windows("prj")[0]
+                sb.event(hook_payload(event, **extra), session="prj", window=current)
+                if state is None:
+                    self.assertTrue(sb.wait_for_no_state("prj", "impl"))
+                    self.assertTrue(sb.wait_for_window("prj", "impl"))
+                else:
+                    self.assertTrue(sb.wait_for_state("prj", "impl"))
+                    self.assertEqual(sb.state("prj", "impl")["state"], state)
+                    self.assertTrue(sb.wait_for_window("prj", f"impl{symbol}"))
+
+    def test_non_error_tool_completion_is_a_noop(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.event(hook_payload("agent_settled", harness="pi"), session="prj", window="impl")
+            self.assertTrue(sb.wait_for_window("prj", "impl✓"))
+            sb.event(hook_payload("tool_execution_end", harness="pi", is_error=False), session="prj", window="impl✓")
+            self.assertEqual(sb.windows("prj"), ["impl✓"])
+            self.assertEqual(sb.state("prj", "impl")["state"], "done")
+
+    def test_unknown_pi_event_and_harness_are_noops(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.event(hook_payload("agent_settled", harness="pi"), session="prj", window="impl")
+            self.assertTrue(sb.wait_for_window("prj", "impl✓"))
+            sb.event(hook_payload("future_event", harness="pi"), session="prj", window="impl✓")
+            sb.event(hook_payload("Stop", harness="bogus"), session="prj", window="impl✓")
+            self.assertEqual(sb.windows("prj"), ["impl✓"])
+            self.assertEqual(sb.state("prj", "impl")["state"], "done")
 
 
 if __name__ == "__main__":
