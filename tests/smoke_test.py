@@ -786,15 +786,25 @@ class SmokePiExtensionRuntime(unittest.TestCase):
             with open(berger, "w") as f:
                 f.write("#!/bin/sh\ncat >> \"$LOG\"; echo >> \"$LOG\"\n")
             os.chmod(berger, 0o755)
-            script = f'''import ext from {json.dumps(ext)}; const h={{}}; ext({{on:(n,f)=>h[n]=f}}); const ctx={{isIdle:()=>true}}; if (h.ui_prompt_start(null,ctx)!==undefined || h.ui_prompt_end(null,ctx)!==undefined) process.exit(2); if (h.agent_start(null)!==undefined || h.agent_settled(null)!==undefined) process.exit(3); await h.session_shutdown(null); await new Promise(r=>setTimeout(r,300));'''
+            script = f'''import ext from {json.dumps(ext)}; const h={{}}; ext({{on:(n,f)=>h[n]=f}}); const ctx={{isIdle:()=>true}}; if (h.ui_prompt_start(null,ctx)!==undefined || h.ui_prompt_end(null,ctx)!==undefined) process.exit(2); h.agent_start(); h.tool_execution_end({{isError:true}}); h.agent_start(); h.agent_settled({{aborted:false}}); h.agent_start(); h.agent_settled({{aborted:false}}); h.agent_start(); h.agent_settled({{aborted:true}}); await h.session_shutdown({{reason:'reload'}}); await h.session_shutdown({{reason:'new'}}); await h.session_shutdown({{reason:'resume'}}); await h.session_shutdown({{reason:'fork'}}); await h.session_shutdown({{reason:'quit'}});'''
             env = {**os.environ, "LOG": log}
             result = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script], env=env, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             with open(log) as f:
-                lines = f.read().splitlines()
+                lines = [json.loads(line) for line in f.read().splitlines()]
             self.assertEqual(
-                [json.loads(line)["hook_event_name"] for line in lines],
-                ["agent_start", "agent_settled", "session_shutdown"],
+                [(line["hook_event_name"], line.get("is_error")) for line in lines],
+                [
+                    ("agent_start", None),
+                    ("tool_execution_end", True),
+                    ("agent_start", None),
+                    ("agent_settled", True),
+                    ("agent_start", None),
+                    ("agent_settled", False),
+                    ("agent_start", None),
+                    ("agent_settled", True),
+                    ("session_shutdown", None),
+                ],
             )
             os.unlink(berger)
             missing = subprocess.run(
@@ -803,6 +813,88 @@ class SmokePiExtensionRuntime(unittest.TestCase):
                 env={**os.environ, "LOG": log}, capture_output=True, text=True, timeout=5,
             )
             self.assertEqual(missing.returncode, 0, missing.stderr)
+
+    def test_replacement_shutdown_drains_old_runtime_queue(self):
+        if not shutil.which("node"):
+            self.skipTest("node unavailable")
+        with TmuxSandbox() as sb:
+            berger = _copy_berger_outside_target(sb._tmpdir)
+            r = subprocess.run([berger, "init", "--harness", "pi"], env={**os.environ, "HOME": sb.home, "XDG_CACHE_HOME": sb.xdg_cache}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ext = os.path.join(sb.home, ".pi/agent/extensions/berger.ts")
+            old_ext = os.path.join(sb._tmpdir, "berger-old.ts")
+            replacement_ext = os.path.join(sb._tmpdir, "berger-replacement.ts")
+            shutil.copyfile(ext, old_ext)
+            shutil.copyfile(ext, replacement_ext)
+            log = os.path.join(sb._tmpdir, "events.log")
+            blocked = os.path.join(sb._tmpdir, "tool-blocked")
+            release = os.path.join(sb._tmpdir, "release-tool")
+            delivered = os.path.join(sb._tmpdir, "replacement-delivered")
+            os.unlink(berger)
+            with open(berger, "w") as f:
+                f.write("#!/bin/sh\npayload=$(cat)\ncase \"$payload\" in\n  *'\"hook_event_name\":\"tool_execution_end\"'*) printf blocked > \"$BLOCKED\"; while [ ! -f \"$RELEASE\" ]; do :; done ;;\nesac\nprintf '%s\\n' \"$payload\" >> \"$LOG\"\ncase \"$payload\" in\n  *'\"hook_event_name\":\"agent_start\"'*) [ ! -e \"$BLOCKED\" ] || printf delivered > \"$DELIVERED\" ;;\nesac\n")
+            os.chmod(berger, 0o755)
+            script = f'''
+import {{ existsSync, watch }} from "node:fs";
+import {{ basename, dirname }} from "node:path";
+import {{ writeFile }} from "node:fs/promises";
+import oldExt from {json.dumps(old_ext)};
+import replacementExt from {json.dumps(replacement_ext)};
+const waitFor = async (path) => {{
+  if (existsSync(path)) return;
+  await new Promise((resolve) => {{
+    const watcher = watch(dirname(path), (_event, changed) => {{
+      if (changed === basename(path)) {{ watcher.close(); resolve(); }}
+    }});
+    if (existsSync(path)) {{ watcher.close(); resolve(); }}
+  }});
+}};
+const oldHandlers = {{}};
+oldExt({{on: (name, handler) => oldHandlers[name] = handler}});
+oldHandlers.agent_start();
+oldHandlers.tool_execution_end({{isError: true}});
+let oldShutdownFinished = false;
+const oldShutdown = oldHandlers.session_shutdown({{reason: "reload"}});
+void oldShutdown.then(() => {{ oldShutdownFinished = true; }});
+let toolBlocked = false;
+try {{
+  await waitFor({json.dumps(blocked)});
+  toolBlocked = true;
+  const replacementHandlers = {{}};
+  replacementExt({{on: (name, handler) => replacementHandlers[name] = handler}});
+  replacementHandlers.agent_start();
+  const replacementShutdown = replacementHandlers.session_shutdown({{reason: "reload"}});
+  await waitFor({json.dumps(delivered)});
+  await Promise.resolve();
+  if (oldShutdownFinished) throw new Error("old shutdown finished before replacement delivery");
+  await replacementShutdown;
+}} finally {{
+  if (toolBlocked) {{
+    await writeFile({json.dumps(release)}, "release\\n");
+    await oldShutdown;
+  }}
+}}
+'''
+            result = subprocess.run(
+                ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+                env={
+                    **os.environ,
+                    "LOG": log,
+                    "BLOCKED": blocked,
+                    "RELEASE": release,
+                    "DELIVERED": delivered,
+                },
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(log) as f:
+                lines = [json.loads(line) for line in f.read().splitlines()]
+            self.assertEqual(
+                [line["hook_event_name"] for line in lines],
+                ["agent_start", "agent_start", "tool_execution_end"],
+            )
 
 
 class SmokePiInitSelection(unittest.TestCase):

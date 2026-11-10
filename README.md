@@ -16,8 +16,8 @@ background process involved.
 |----------|--------|------------------------|
 | working  | _(none)_ | Busy, no action needed |
 | approval | `!`    | Needs your input        |
-| done     | `✓`    | Session finished        |
-| error    | `✗`    | Hook / tool error       |
+| done     | `✓`    | Agent run settled       |
+| error    | `✗`    | Hook, tool, or aborted run error |
 
 ## Quick start
 
@@ -52,7 +52,7 @@ tmux rename-window impl
 tmux rename-window plan
 ```
 
-When Claude Code runs in one of these windows, the suffix updates as hooks fire.
+When Claude Code or Pi runs in one of these windows, the suffix updates as lifecycle events fire.
 
 ## Event → state mapping
 
@@ -67,12 +67,19 @@ When Claude Code runs in one of these windows, the suffix updates as hooks fire.
 | Pi | `ui_prompt_start` during an agent run | `approval` | `!` |
 | Pi | `ui_prompt_end` during an agent run | `working` | _(none)_ |
 | Pi | `tool_execution_end` when `isError` | `error` | `✗` |
-| Pi | `agent_settled` | `done` | `✓` |
-| Pi | `session_shutdown` | _(state file deleted)_ | _(suffix cleared)_ |
+| Pi | `agent_settled` when not aborted and no failed tool was observed | `done` | `✓` |
+| Pi | `agent_settled` after an aborted run or a failed tool | `error` | `✗` |
+| Pi | `session_shutdown` with reason `quit` | _(state file deleted)_ | _(suffix cleared)_ |
 
-Unknown Pi events and unknown harnesses are ignored. Pi does not expose an exact
-equivalent for every Claude Code transition, so its status mapping is intentionally limited
-to the reliable extension events above.
+Pi reports `done` only when the run was not aborted and no failed tool was observed;
+provider failures without either signal are not observable to this extension. Reloads,
+session replacements (`new`, `resume`, `fork`), and their following `session_start` do
+not change the current marker: Pi tears down the old extension
+before loading the replacement, so clearing on those shutdowns would incorrectly
+lose the window status. A subsequent agent lifecycle event updates it. Unknown Pi
+events and unknown harnesses are ignored. Pi does not expose an exact equivalent
+for every Claude Code transition, so its status mapping is intentionally limited to
+the reliable extension events above.
 
 `berger event` never exits non-zero — it sits on Claude Code's hook path, where a
 failing exit code can block a tool call or prompt, so a berger bug must never be

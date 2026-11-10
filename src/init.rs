@@ -332,12 +332,22 @@ const send = (event: string, isError?: boolean) => {{
   return queue;
 }};
 export default function(pi: ExtensionAPI) {{
+  let hadError = false;
   pi.on('agent_start', () => {{ void send('agent_start'); }});
   pi.on('ui_prompt_start', (_event, ctx) => {{ if (!ctx.isIdle()) void send('ui_prompt_start'); }});
   pi.on('ui_prompt_end', (_event, ctx) => {{ if (!ctx.isIdle()) void send('ui_prompt_end'); }});
-  pi.on('tool_execution_end', (e: any) => {{ if (e?.isError) send('tool_execution_end', true); }});
-  pi.on('agent_settled', () => {{ void send('agent_settled'); }});
-  pi.on('session_shutdown', async () => {{ await send('session_shutdown'); }});
+  pi.on('tool_execution_end', (e: any) => {{
+    if (e?.isError) {{ hadError = true; void send('tool_execution_end', true); }}
+  }});
+  pi.on('agent_settled', (e: any) => {{
+    const isError = hadError || e?.aborted;
+    hadError = false;
+    void send('agent_settled', isError);
+  }});
+  pi.on('session_shutdown', async (e: any) => {{
+    if (e?.reason === 'quit') await send('session_shutdown');
+    else await queue;
+  }});
 }}
 "#
     )

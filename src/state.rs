@@ -47,6 +47,7 @@ pub fn state_for_event(harness: &str, event: &str, is_error: Option<bool>) -> Op
             "agent_start" | "ui_prompt_end" => Some(State::Working),
             "ui_prompt_start" => Some(State::Approval),
             "tool_execution_end" if is_error == Some(true) => Some(State::Error),
+            "agent_settled" if is_error == Some(true) => Some(State::Error),
             "agent_settled" => Some(State::Done),
             "session_shutdown" => None,
             _ => None,
@@ -341,7 +342,8 @@ mod tests {
             ("pi", "ui_prompt_end", None, Some(State::Working)),
             ("pi", "tool_execution_end", Some(true), Some(State::Error)),
             ("pi", "tool_execution_end", Some(false), None),
-            ("pi", "agent_settled", None, Some(State::Done)),
+            ("pi", "agent_settled", Some(true), Some(State::Error)),
+            ("pi", "agent_settled", Some(false), Some(State::Done)),
             ("pi", "session_shutdown", None, None),
             ("pi", "future_event", None, None),
         ] {
