@@ -1,4 +1,4 @@
-# Manual test rig for berger: tmux + claude + berger in one container.
+# Manual test rig for berger: tmux + Claude Code + Pi + berger in one container.
 # Not a build artifact for release — local verification only.
 
 FROM rust:1-slim-bookworm AS builder
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux curl ca-certificates gnupg locales \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @anthropic-ai/claude-code @earendil-works/pi-coding-agent \
     && apt-get purge -y gnupg curl \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen
