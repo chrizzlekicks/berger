@@ -306,51 +306,15 @@ fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
 }
 
 const PI_EXTENSION_MARKER: &str = "// Managed by berger init;";
+const PI_EXTENSION_BINARY_PLACEHOLDER: &str = "__BERGER_BIN__";
+const PI_EXTENSION_TEMPLATE: &str = include_str!("../tests/fixtures/pi-extension.ts");
 
 fn pi_extension_contents(berger_bin: &str) -> String {
     let binary = serde_json::to_string(berger_bin)
         .unwrap()
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029");
-    format!(
-        r#"{PI_EXTENSION_MARKER} forwards reliable Pi lifecycle events.
-import {{ spawn }} from "node:child_process";
-import type {{ ExtensionAPI }} from "@earendil-works/pi-coding-agent";
-let queue = Promise.resolve();
-const send = (event: string, isError?: boolean) => {{
-  queue = queue.then(() => new Promise<void>((resolve) => {{
-    const p = spawn({binary}, ['event'], {{ detached: true, stdio: ['pipe', 'ignore', 'ignore'] }});
-    let finished = false;
-    const done = () => {{ if (!finished) {{ finished = true; clearTimeout(timer); resolve(); }} }};
-    p.on('error', done);
-    p.on('close', done);
-    p.stdin?.on('error', () => {{}});
-    const timer = setTimeout(() => {{ p.kill(); done(); }}, 1000);
-    p.stdin?.end(JSON.stringify({{ hook_event_name: event, harness: 'pi', is_error: isError }}));
-    p.unref();
-  }}));
-  return queue;
-}};
-export default function(pi: ExtensionAPI) {{
-  let hadError = false;
-  pi.on('agent_start', () => {{ void send('agent_start'); }});
-  pi.on('ui_prompt_start', (_event, ctx) => {{ if (!ctx.isIdle()) void send('ui_prompt_start'); }});
-  pi.on('ui_prompt_end', (_event, ctx) => {{ if (!ctx.isIdle()) void send('ui_prompt_end'); }});
-  pi.on('tool_execution_end', (e: any) => {{
-    if (e?.isError) {{ hadError = true; void send('tool_execution_end', true); }}
-  }});
-  pi.on('agent_settled', (e: any) => {{
-    const isError = hadError || e?.aborted;
-    hadError = false;
-    void send('agent_settled', isError);
-  }});
-  pi.on('session_shutdown', async (e: any) => {{
-    if (e?.reason === 'quit') await send('session_shutdown');
-    else await queue;
-  }});
-}}
-"#
-    )
+    PI_EXTENSION_TEMPLATE.replace(PI_EXTENSION_BINARY_PLACEHOLDER, &binary)
 }
 
 fn write_pi_extension_at(path: &Path, berger_bin: &str) -> io::Result<()> {
@@ -631,9 +595,19 @@ mod tests {
     }
 
     #[test]
+    fn pi_extension_template_has_one_binary_placeholder() {
+        assert_eq!(
+            PI_EXTENSION_TEMPLATE
+                .matches(PI_EXTENSION_BINARY_PLACEHOLDER)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn pi_extension_uses_a_safe_javascript_string_literal() {
         let contents = pi_extension_contents("/tmp/line\nseparator\u{2028}'berger");
-        assert!(contents.contains(r#"spawn("/tmp/line\nseparator\u2028'berger""#));
+        assert!(contents.contains(r#"const berger = "/tmp/line\nseparator\u2028'berger";"#));
     }
 
     #[test]

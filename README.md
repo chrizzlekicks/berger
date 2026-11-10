@@ -33,7 +33,7 @@ Run both initialization commands if you use both harnesses. `init` wires everyth
   `berger event`, leaving unrelated hooks untouched.
 - For Pi, writes the supported global extension
   `~/.pi/agent/extensions/berger.ts`, leaving other extensions and configuration
-  untouched.
+  untouched. It refuses to overwrite an unmanaged `berger.ts`.
 - Re-running either form is idempotent.
 - Writes `~/.config/berger/tmux.conf` (berger's own settings — `allow-rename off`,
   `automatic-rename off`, and a `prefix + M` binding that runs `berger sync`).
@@ -107,7 +107,8 @@ for anything that falls out of sync in between.
 
 Unit tests live alongside the Rust source (`cargo test`). The smoke suite in
 `tests/smoke_test.py` drives a real, throwaway tmux server end-to-end —
-build the binary first, then run it:
+build the binary first, then run it. Pi runtime smoke tests require Node 22.6+
+for `--experimental-strip-types`; they are skipped when that version is unavailable:
 
 ```bash
 cargo build

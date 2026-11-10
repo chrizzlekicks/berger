@@ -17,9 +17,11 @@ Usage:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -28,6 +30,32 @@ from harness.sandbox import TmuxSandbox, BERGER_BIN
 from harness.payloads import hook_payload, suffixed, EVENT_TABLE, ALL_EVENTS, PI_EVENT_TABLE
 
 FIXTURE_SETTINGS = os.path.join(os.path.dirname(__file__), "fixtures", "settings.json")
+
+
+def node_supports_strip_types(version):
+    """Return whether a Node version supports --experimental-strip-types."""
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.\d+", version.strip())
+    if not match:
+        return False
+    return tuple(map(int, match.groups())) >= (22, 6)
+
+
+def node_with_strip_types():
+    node = shutil.which("node")
+    if node is None:
+        return None
+    version = subprocess.run(
+        [node, "--version"], capture_output=True, text=True, timeout=5
+    )
+    return node if version.returncode == 0 and node_supports_strip_types(version.stdout) else None
+
+
+class SmokePiNodeCompatibility(unittest.TestCase):
+    def test_strip_types_requires_node_22_6_or_newer(self):
+        self.assertFalse(node_supports_strip_types("v22.5.1"))
+        self.assertTrue(node_supports_strip_types("v22.6.0"))
+        self.assertTrue(node_supports_strip_types("v23.0.0"))
+        self.assertFalse(node_supports_strip_types("not a Node version"))
 
 
 # ---------------------------------------------------------------------------
@@ -774,11 +802,22 @@ class SmokeResetAmuxPreservation(unittest.TestCase):
 
 class SmokePiExtensionRuntime(unittest.TestCase):
     def test_generated_extension_runtime(self):
-        if not shutil.which("node"):
-            self.skipTest("node unavailable")
+        node = node_with_strip_types()
+        if node is None:
+            self.skipTest("Node >= 22.6 required for --experimental-strip-types")
+
         with TmuxSandbox() as sb:
             berger = _copy_berger_outside_target(sb._tmpdir)
-            r = subprocess.run([berger, "init", "--harness", "pi"], env={**os.environ, "HOME": sb.home, "XDG_CACHE_HOME": sb.xdg_cache}, capture_output=True, text=True)
+            init_env = dict(os.environ)
+            init_env["HOME"] = sb.home
+            init_env["XDG_CACHE_HOME"] = sb.xdg_cache
+            init_env.pop("XDG_CONFIG_HOME", None)
+            r = subprocess.run(
+                [berger, "init", "--harness", "pi"],
+                env=init_env,
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(r.returncode, 0, r.stderr)
             ext = os.path.join(sb.home, ".pi/agent/extensions/berger.ts")
             log = os.path.join(sb._tmpdir, "events.log")
@@ -786,9 +825,39 @@ class SmokePiExtensionRuntime(unittest.TestCase):
             with open(berger, "w") as f:
                 f.write("#!/bin/sh\ncat >> \"$LOG\"; echo >> \"$LOG\"\n")
             os.chmod(berger, 0o755)
-            script = f'''import ext from {json.dumps(ext)}; const h={{}}; ext({{on:(n,f)=>h[n]=f}}); const ctx={{isIdle:()=>true}}; if (h.ui_prompt_start(null,ctx)!==undefined || h.ui_prompt_end(null,ctx)!==undefined) process.exit(2); h.agent_start(); h.tool_execution_end({{isError:true}}); h.agent_start(); h.agent_settled({{aborted:false}}); h.agent_start(); h.agent_settled({{aborted:false}}); h.agent_start(); h.agent_settled({{aborted:true}}); await h.session_shutdown({{reason:'reload'}}); await h.session_shutdown({{reason:'new'}}); await h.session_shutdown({{reason:'resume'}}); await h.session_shutdown({{reason:'fork'}}); await h.session_shutdown({{reason:'quit'}});'''
+            script = textwrap.dedent(f"""\
+                import ext from {json.dumps(ext)};
+
+                const handlers = {{}};
+                ext({{on: (name, handler) => handlers[name] = handler}});
+                const ctx = {{isIdle: () => true}};
+                if (
+                  handlers.ui_prompt_start(null, ctx) !== undefined ||
+                  handlers.ui_prompt_end(null, ctx) !== undefined
+                ) process.exit(2);
+
+                handlers.agent_start();
+                handlers.tool_execution_end({{isError: true}});
+                handlers.agent_start();
+                handlers.agent_settled({{aborted: false}});
+                handlers.agent_start();
+                handlers.agent_settled({{aborted: false}});
+                handlers.agent_start();
+                handlers.agent_settled({{aborted: true}});
+                await handlers.session_shutdown({{reason: 'reload'}});
+                await handlers.session_shutdown({{reason: 'new'}});
+                await handlers.session_shutdown({{reason: 'resume'}});
+                await handlers.session_shutdown({{reason: 'fork'}});
+                await handlers.session_shutdown({{reason: 'quit'}});
+            """)
             env = {**os.environ, "LOG": log}
-            result = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script], env=env, capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                [node, "--experimental-strip-types", "--input-type=module", "-e", script],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             with open(log) as f:
                 lines = [json.loads(line) for line in f.read().splitlines()]
@@ -808,18 +877,44 @@ class SmokePiExtensionRuntime(unittest.TestCase):
             )
             os.unlink(berger)
             missing = subprocess.run(
-                ["node", "--experimental-strip-types", "--input-type=module", "-e",
-                 f"import ext from {json.dumps(ext)}; const h={{}}; ext({{on:(n,f)=>h[n]=f}}); h.agent_start(); await new Promise(r=>setTimeout(r,1100));"],
-                env={**os.environ, "LOG": log}, capture_output=True, text=True, timeout=5,
+                [
+                    node,
+                    "--experimental-strip-types",
+                    "--input-type=module",
+                    "-e",
+                    textwrap.dedent(f"""\
+                        import ext from {json.dumps(ext)};
+
+                        const handlers = {{}};
+                        ext({{on: (name, handler) => handlers[name] = handler}});
+                        handlers.agent_start();
+                        await new Promise(resolve => setTimeout(resolve, 1100));
+                    """),
+                ],
+                env={**os.environ, "LOG": log},
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             self.assertEqual(missing.returncode, 0, missing.stderr)
 
     def test_replacement_shutdown_drains_old_runtime_queue(self):
-        if not shutil.which("node"):
-            self.skipTest("node unavailable")
+        node = node_with_strip_types()
+        if node is None:
+            self.skipTest("Node >= 22.6 required for --experimental-strip-types")
+
         with TmuxSandbox() as sb:
             berger = _copy_berger_outside_target(sb._tmpdir)
-            r = subprocess.run([berger, "init", "--harness", "pi"], env={**os.environ, "HOME": sb.home, "XDG_CACHE_HOME": sb.xdg_cache}, capture_output=True, text=True)
+            init_env = dict(os.environ)
+            init_env["HOME"] = sb.home
+            init_env["XDG_CACHE_HOME"] = sb.xdg_cache
+            init_env.pop("XDG_CONFIG_HOME", None)
+            r = subprocess.run(
+                [berger, "init", "--harness", "pi"],
+                env=init_env,
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(r.returncode, 0, r.stderr)
             ext = os.path.join(sb.home, ".pi/agent/extensions/berger.ts")
             old_ext = os.path.join(sb._tmpdir, "berger-old.ts")
@@ -832,51 +927,71 @@ class SmokePiExtensionRuntime(unittest.TestCase):
             delivered = os.path.join(sb._tmpdir, "replacement-delivered")
             os.unlink(berger)
             with open(berger, "w") as f:
-                f.write("#!/bin/sh\npayload=$(cat)\ncase \"$payload\" in\n  *'\"hook_event_name\":\"tool_execution_end\"'*) printf blocked > \"$BLOCKED\"; while [ ! -f \"$RELEASE\" ]; do :; done ;;\nesac\nprintf '%s\\n' \"$payload\" >> \"$LOG\"\ncase \"$payload\" in\n  *'\"hook_event_name\":\"agent_start\"'*) [ ! -e \"$BLOCKED\" ] || printf delivered > \"$DELIVERED\" ;;\nesac\n")
+                f.write(textwrap.dedent("""\
+                    #!/bin/sh
+                    payload=$(cat)
+                    case "$payload" in
+                      *'"hook_event_name":"tool_execution_end"'*)
+                        printf blocked > "$BLOCKED"
+                        while [ ! -f "$RELEASE" ]; do :; done
+                        ;;
+                    esac
+                    printf '%s\\n' "$payload" >> "$LOG"
+                    case "$payload" in
+                      *'"hook_event_name":"agent_start"'*)
+                        [ ! -e "$BLOCKED" ] || printf delivered > "$DELIVERED"
+                        ;;
+                    esac
+                """))
             os.chmod(berger, 0o755)
-            script = f'''
-import {{ existsSync, watch }} from "node:fs";
-import {{ basename, dirname }} from "node:path";
-import {{ writeFile }} from "node:fs/promises";
-import oldExt from {json.dumps(old_ext)};
-import replacementExt from {json.dumps(replacement_ext)};
-const waitFor = async (path) => {{
-  if (existsSync(path)) return;
-  await new Promise((resolve) => {{
-    const watcher = watch(dirname(path), (_event, changed) => {{
-      if (changed === basename(path)) {{ watcher.close(); resolve(); }}
-    }});
-    if (existsSync(path)) {{ watcher.close(); resolve(); }}
-  }});
-}};
-const oldHandlers = {{}};
-oldExt({{on: (name, handler) => oldHandlers[name] = handler}});
-oldHandlers.agent_start();
-oldHandlers.tool_execution_end({{isError: true}});
-let oldShutdownFinished = false;
-const oldShutdown = oldHandlers.session_shutdown({{reason: "reload"}});
-void oldShutdown.then(() => {{ oldShutdownFinished = true; }});
-let toolBlocked = false;
-try {{
-  await waitFor({json.dumps(blocked)});
-  toolBlocked = true;
-  const replacementHandlers = {{}};
-  replacementExt({{on: (name, handler) => replacementHandlers[name] = handler}});
-  replacementHandlers.agent_start();
-  const replacementShutdown = replacementHandlers.session_shutdown({{reason: "reload"}});
-  await waitFor({json.dumps(delivered)});
-  await Promise.resolve();
-  if (oldShutdownFinished) throw new Error("old shutdown finished before replacement delivery");
-  await replacementShutdown;
-}} finally {{
-  if (toolBlocked) {{
-    await writeFile({json.dumps(release)}, "release\\n");
-    await oldShutdown;
-  }}
-}}
-'''
+            script = textwrap.dedent(f"""\
+                import {{ existsSync, watch }} from "node:fs";
+                import {{ basename, dirname }} from "node:path";
+                import {{ writeFile }} from "node:fs/promises";
+                import oldExt from {json.dumps(old_ext)};
+                import replacementExt from {json.dumps(replacement_ext)};
+
+                const waitFor = async (path) => {{
+                  if (existsSync(path)) return;
+                  await new Promise((resolve) => {{
+                    const watcher = watch(dirname(path), (_event, changed) => {{
+                      if (changed === basename(path)) {{ watcher.close(); resolve(); }}
+                    }});
+                    if (existsSync(path)) {{ watcher.close(); resolve(); }}
+                  }});
+                }};
+
+                const oldHandlers = {{}};
+                oldExt({{on: (name, handler) => oldHandlers[name] = handler}});
+                oldHandlers.agent_start();
+                oldHandlers.tool_execution_end({{isError: true}});
+                let oldShutdownFinished = false;
+                const oldShutdown = oldHandlers.session_shutdown({{reason: "reload"}});
+                void oldShutdown.then(() => {{ oldShutdownFinished = true; }});
+                let toolBlocked = false;
+
+                try {{
+                  await waitFor({json.dumps(blocked)});
+                  toolBlocked = true;
+                  const replacementHandlers = {{}};
+                  replacementExt({{on: (name, handler) => replacementHandlers[name] = handler}});
+                  replacementHandlers.agent_start();
+                  const replacementShutdown = replacementHandlers.session_shutdown({{reason: "reload"}});
+                  await waitFor({json.dumps(delivered)});
+                  await Promise.resolve();
+                  if (oldShutdownFinished) {{
+                    throw new Error("old shutdown finished before replacement delivery");
+                  }}
+                  await replacementShutdown;
+                }} finally {{
+                  if (toolBlocked) {{
+                    await writeFile({json.dumps(release)}, "release\\n");
+                    await oldShutdown;
+                  }}
+                }}
+            """)
             result = subprocess.run(
-                ["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+                [node, "--experimental-strip-types", "--input-type=module", "-e", script],
                 env={
                     **os.environ,
                     "LOG": log,

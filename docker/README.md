@@ -43,7 +43,8 @@ docker run -it --rm --name berger-test \
   berger-test
 ```
 
-Or copy an existing login into the throwaway container home:
+Or mount an existing login read-only; the entrypoint copies it into the
+throwaway container home:
 
 ```bash
 docker run -it --rm --name berger-test \
@@ -65,7 +66,8 @@ docker run -it --rm --name berger-test \
   berger-test
 ```
 
-Alternatively copy Pi's saved credentials into the throwaway container home:
+Alternatively mount Pi's saved credentials read-only; the entrypoint copies them
+into the throwaway container home:
 
 ```bash
 docker run -it --rm --name berger-test \

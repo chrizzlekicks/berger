@@ -5,12 +5,13 @@ FROM rust:1-slim-bookworm AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY tests/fixtures/pi-extension.ts ./tests/fixtures/pi-extension.ts
 RUN cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux curl ca-certificates gnupg locales \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code @earendil-works/pi-coding-agent \
     && apt-get purge -y gnupg curl \
