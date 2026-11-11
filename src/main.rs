@@ -10,14 +10,27 @@ mod sync;
 mod tmux;
 
 fn usage() -> ! {
-    eprintln!("usage: berger <init|event|reset|sync --session <name>>");
+    eprintln!("usage: berger <init [--harness <claude|pi>]|event|reset|sync --session <name>>");
     std::process::exit(1);
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("init") => init::run(),
+        Some("init") => {
+            let rest: Vec<_> = args.collect();
+            let harness = match rest.as_slice() {
+                [] => "claude",
+                [flag, value] if flag == "--harness" && (value == "claude" || value == "pi") => {
+                    value
+                }
+                _ => {
+                    eprintln!("berger init: --harness must be claude or pi");
+                    std::process::exit(1);
+                }
+            };
+            init::run(harness)
+        }
         Some("event") => event::run(),
         Some("reset") => reset::run(),
         Some("sync") => {

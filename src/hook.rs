@@ -8,6 +8,10 @@ pub struct HookPayload {
     pub hook_event_name: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub is_error: Option<bool>,
 }
 
 #[cfg(test)]

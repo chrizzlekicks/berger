@@ -1,6 +1,6 @@
 """Hook-JSON payload builders and the verified event -> (state, symbol) table.
 
-Mirrors src/state.rs::state_for_event and State::symbol exactly. Keep these two
+Mirrors src/event.rs::state_for_event and State::symbol exactly. Keep these two
 in sync with the Rust source if the contract changes -- that's the whole point
 of a smoke test.
 """
@@ -21,6 +21,15 @@ EVENT_TABLE = {
 }
 
 ALL_EVENTS = list(EVENT_TABLE.keys())
+
+PI_EVENT_TABLE = {
+    "agent_start": ("working", ""),
+    "ui_prompt_start": ("approval", "!"),
+    "ui_prompt_end": ("working", ""),
+    "tool_execution_end": ("error", "✗"),
+    "agent_settled": ("done", "✓"),
+    "session_shutdown": (None, None),
+}
 
 
 def hook_payload(event_name, **extra):

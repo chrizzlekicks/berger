@@ -1,27 +1,29 @@
 # Manual test rig
 
-Build and run a container with tmux, Claude Code, and berger wired together, to
-reproduce/verify behavior by hand.
+Build and run a container with tmux, Claude Code, Pi, and berger wired together:
 
 ```bash
 docker build -f docker/Dockerfile -t berger-test .
 docker run -it --rm --name berger-test berger-test
 ```
 
-This drops you into a tmux session named `test` with berger's hooks and tmux
-config already installed (`berger init` ran in the entrypoint, against a
-container-local `$HOME` — your real `~/.claude` is untouched).
+The default initializes both harnesses in a container-local `$HOME`. Select one
+when needed:
 
-## Watching renames from a second terminal
+```bash
+docker run -it --rm -e BERGER_HARNESS=claude berger-test
+docker run -it --rm -e BERGER_HARNESS=pi berger-test
+```
+
+Your host configuration is untouched. To watch window renames from another terminal:
 
 ```bash
 docker exec -it berger-test tmux attach
 ```
 
-## Driving events without live Claude auth
+## Synthetic Claude events
 
-Inside the container, rename a window to an agent name, then fire synthetic
-hook events at it:
+Inside the container:
 
 ```bash
 tmux rename-window impl
@@ -30,35 +32,62 @@ fake-event Stop                # window suffix -> ✓
 fake-event SessionEnd          # suffix cleared
 ```
 
-## Testing with a real Claude Code session
+## Live Claude Code
 
-The whole point of this container is testing berger *without* touching your
-real `~/.claude` on the host — so credentials go in read-only, and berger's
-own hook config stays entirely inside the container.
-
-**Option A — API key** (simplest, no login flow):
+Pass an API key:
 
 ```bash
 docker run -it --rm --name berger-test \
+  -e BERGER_HARNESS=claude \
   -e ANTHROPIC_API_KEY \
   berger-test
 ```
 
-**Option B — reuse your existing Claude Code login**, without letting the
-container write back to your real settings: mount only the credentials file,
-read-only, to the path the entrypoint expects:
+Or mount an existing login read-only; the entrypoint copies it into the
+throwaway container home:
 
 ```bash
 docker run -it --rm --name berger-test \
+  -e BERGER_HARNESS=claude \
   -v ~/.claude/.credentials.json:/run/secrets/claude-credentials.json:ro \
   berger-test
 ```
 
-The entrypoint copies that into the container's own `~/.claude/`, then runs
-`berger init` on top — so hook wiring happens in the container's throwaway
-`$HOME`, and your host `~/.claude/settings.json` is never opened, let alone
-rewritten. Don't bind-mount `~/.claude` directly (writable or not) — that
-would let `berger init` edit your real hook config.
+Then rename the tmux window and run `claude`.
 
-Then just run `claude` in a renamed tmux window and watch the suffix track
-its lifecycle.
+## Live Pi
+
+The simplest option is a provider API key. For Anthropic:
+
+```bash
+docker run -it --rm --name berger-test \
+  -e BERGER_HARNESS=pi \
+  -e ANTHROPIC_API_KEY \
+  berger-test
+```
+
+Alternatively mount Pi's saved credentials read-only; the entrypoint copies them
+into the throwaway container home:
+
+```bash
+docker run -it --rm --name berger-test \
+  -e BERGER_HARNESS=pi \
+  -v ~/.pi/agent/auth.json:/run/secrets/pi-auth.json:ro \
+  berger-test
+```
+
+Inside the container, verify authentication and choose an available model:
+
+```bash
+pi auth check --provider anthropic
+pi --list-models
+tmux rename-window impl
+pi --provider anthropic --model <model-id>
+```
+
+During a run the window is `impl`; settlement changes it to `impl✓` or `impl✗`.
+Quitting Pi clears the suffix.
+
+Do not mount all of `~/.claude` or `~/.pi/agent`. Those directories contain
+configuration, sessions, extensions, and credentials that the container should
+not modify. Live provider tests make real requests and may incur cost.

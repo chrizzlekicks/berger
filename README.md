@@ -1,10 +1,10 @@
 # berger
 
-Make tmux sessions agent-aware from Claude Code lifecycle hooks.
+Make tmux sessions agent-aware from Claude Code and Pi lifecycle events.
 
-Claude Code hooks call `berger event`, which writes a state file and renames the
-current tmux window to show the agent's status as a suffix — no background
-process involved.
+Claude Code hooks or a Pi extension call `berger event`, which writes a state file
+and renames the current tmux window to show the agent's status as a suffix — no
+background process involved.
 
 ```
 1:main  2:plan  3:impl!  4:review✓  5:tests✗
@@ -16,20 +16,25 @@ process involved.
 |----------|--------|------------------------|
 | working  | _(none)_ | Busy, no action needed |
 | approval | `!`    | Needs your input        |
-| done     | `✓`    | Session finished        |
-| error    | `✗`    | Hook / tool error       |
+| done     | `✓`    | Agent run settled       |
+| error    | `✗`    | Hook, tool, or aborted run error |
 
 ## Quick start
 
 ```bash
 cargo install --path . --root ~/.local
-berger init
+berger init                       # Claude Code (default)
+berger init --harness pi          # Pi
 ```
 
-`init` wires everything up:
+Run both initialization commands if you use both harnesses. `init` wires everything up:
 
-- Rewrites `~/.claude/settings.json` so all 8 lifecycle hooks call `berger event`,
-  leaving unrelated hooks untouched. Re-running `init` is idempotent.
+- For Claude Code, rewrites `~/.claude/settings.json` so all 8 lifecycle hooks call
+  `berger event`, leaving unrelated hooks untouched.
+- For Pi, writes the supported global extension
+  `~/.pi/agent/extensions/berger.ts`, leaving other extensions and configuration
+  untouched. It refuses to overwrite an unmanaged `berger.ts`.
+- Re-running either form is idempotent.
 - Writes `~/.config/berger/tmux.conf` (berger's own settings — `allow-rename off`,
   `automatic-rename off`, and a `prefix + M` binding that runs `berger sync`).
   Prints the one line to add to your `~/.tmux.conf`:
@@ -47,20 +52,34 @@ tmux rename-window impl
 tmux rename-window plan
 ```
 
-When Claude Code runs in one of these windows, the suffix updates as hooks fire.
+When Claude Code or Pi runs in one of these windows, the suffix updates as lifecycle events fire.
 
 ## Event → state mapping
 
-| Event | State | Symbol |
-|---|---|---|
-| `SessionStart` | `working` | _(none)_ |
-| `UserPromptSubmit` | `working` | _(none)_ |
-| `PreToolUse` | `working` | _(none)_ |
-| `PermissionRequest` | `approval` | `!` |
-| `PostToolUseFailure` | `error` | `✗` |
-| `Stop` | `done` | `✓` |
-| `StopFailure` | `error` | `✗` |
-| `SessionEnd` | _(state file deleted)_ | _(suffix cleared)_ |
+| Harness | Event | State | Symbol |
+|---|---|---|---|
+| Claude | `SessionStart`, `UserPromptSubmit`, `PreToolUse` | `working` | _(none)_ |
+| Claude | `PermissionRequest` | `approval` | `!` |
+| Claude | `PostToolUseFailure`, `StopFailure` | `error` | `✗` |
+| Claude | `Stop` | `done` | `✓` |
+| Claude | `SessionEnd` | _(state file deleted)_ | _(suffix cleared)_ |
+| Pi | `agent_start` | `working` | _(none)_ |
+| Pi | `ui_prompt_start` during an agent run | `approval` | `!` |
+| Pi | `ui_prompt_end` during an agent run | `working` | _(none)_ |
+| Pi | `tool_execution_end` when `isError` | `error` | `✗` |
+| Pi | `agent_settled` when not aborted and no failed tool was observed | `done` | `✓` |
+| Pi | `agent_settled` after an aborted run or a failed tool | `error` | `✗` |
+| Pi | `session_shutdown` with reason `quit` | _(state file deleted)_ | _(suffix cleared)_ |
+
+Pi reports `done` only when the run was not aborted and no failed tool was observed;
+provider failures without either signal are not observable to this extension. Reloads,
+session replacements (`new`, `resume`, `fork`), and their following `session_start` do
+not change the current marker: Pi tears down the old extension
+before loading the replacement, so clearing on those shutdowns would incorrectly
+lose the window status. A subsequent agent lifecycle event updates it. Unknown Pi
+events and unknown harnesses are ignored. Pi does not expose an exact equivalent
+for every Claude Code transition, so its status mapping is intentionally limited to
+the reliable extension events above.
 
 `berger event` never exits non-zero — it sits on Claude Code's hook path, where a
 failing exit code can block a tool call or prompt, so a berger bug must never be
@@ -88,7 +107,8 @@ for anything that falls out of sync in between.
 
 Unit tests live alongside the Rust source (`cargo test`). The smoke suite in
 `tests/smoke_test.py` drives a real, throwaway tmux server end-to-end —
-build the binary first, then run it:
+build the binary first, then run it. Pi runtime smoke tests require Node 22.6+
+for `--experimental-strip-types`; they are skipped when that version is unavailable:
 
 ```bash
 cargo build
@@ -123,13 +143,14 @@ claude
 | Binary | `~/.local/bin/berger` |
 | tmux config | `~/.config/berger/tmux.conf` (sourced from your `~/.tmux.conf`) |
 | Claude Code hooks | `~/.claude/settings.json` |
+| Pi extension | `~/.pi/agent/extensions/berger.ts` |
 | State files | `$XDG_CACHE_HOME/berger/<session>/<agent>.state` (default `~/.cache/berger/...`) |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    hook["Claude Code hook\n(any of 8 events)"] -->|stdin JSON| event["berger event"]
+    hook["Claude Code hooks / Pi extension"] -->|stdin JSON| event["berger event"]
     event -->|"atomic write\n(tmpfile + rename)"| state[("state file\n<session>/<agent>.state")]
     event -->|rename-window| tmux(("tmux window\n<agent><symbol>"))
 

@@ -17,17 +17,45 @@ Usage:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from harness.sandbox import TmuxSandbox, BERGER_BIN
-from harness.payloads import hook_payload, suffixed, EVENT_TABLE, ALL_EVENTS
+from harness.payloads import hook_payload, suffixed, EVENT_TABLE, ALL_EVENTS, PI_EVENT_TABLE
 
 FIXTURE_SETTINGS = os.path.join(os.path.dirname(__file__), "fixtures", "settings.json")
+
+
+def node_supports_strip_types(version):
+    """Return whether a Node version supports --experimental-strip-types."""
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.\d+", version.strip())
+    if not match:
+        return False
+    return tuple(map(int, match.groups())) >= (22, 6)
+
+
+def node_with_strip_types():
+    node = shutil.which("node")
+    if node is None:
+        return None
+    version = subprocess.run(
+        [node, "--version"], capture_output=True, text=True, timeout=5
+    )
+    return node if version.returncode == 0 and node_supports_strip_types(version.stdout) else None
+
+
+class SmokePiNodeCompatibility(unittest.TestCase):
+    def test_strip_types_requires_node_22_6_or_newer(self):
+        self.assertFalse(node_supports_strip_types("v22.5.1"))
+        self.assertTrue(node_supports_strip_types("v22.6.0"))
+        self.assertTrue(node_supports_strip_types("v23.0.0"))
+        self.assertFalse(node_supports_strip_types("not a Node version"))
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +261,7 @@ class SmokeRobustness(unittest.TestCase):
             self.assertIn("malformed", out.lower())
             self.assertIsNone(sb.state("prj", "impl"))
 
-    def test_unknown_hook_event_name_clears_like_session_end(self):
+    def test_unknown_claude_event_preserves_legacy_cleanup_behavior(self):
         with TmuxSandbox() as sb:
             sb.new_session("prj", "impl")
             sb.event(hook_payload("Stop"), session="prj", window="impl")
@@ -770,6 +798,322 @@ class SmokeResetAmuxPreservation(unittest.TestCase):
             self.assertTrue(os.path.exists(amux_cache))
             with open(os.path.join(amux_cache, "prj", "watch.pid")) as f:
                 self.assertEqual(f.read(), pid_contents)
+
+
+class SmokePiExtensionRuntime(unittest.TestCase):
+    def test_generated_extension_runtime(self):
+        node = node_with_strip_types()
+        if node is None:
+            self.skipTest("Node >= 22.6 required for --experimental-strip-types")
+
+        with TmuxSandbox() as sb:
+            berger = _copy_berger_outside_target(sb._tmpdir)
+            init_env = dict(os.environ)
+            init_env["HOME"] = sb.home
+            init_env["XDG_CACHE_HOME"] = sb.xdg_cache
+            init_env.pop("XDG_CONFIG_HOME", None)
+            r = subprocess.run(
+                [berger, "init", "--harness", "pi"],
+                env=init_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ext = os.path.join(sb.home, ".pi/agent/extensions/berger.ts")
+            log = os.path.join(sb._tmpdir, "events.log")
+            os.unlink(berger)
+            with open(berger, "w") as f:
+                f.write("#!/bin/sh\ncat >> \"$LOG\"; echo >> \"$LOG\"\n")
+            os.chmod(berger, 0o755)
+            script = textwrap.dedent(f"""\
+                import ext from {json.dumps(ext)};
+
+                const handlers = {{}};
+                ext({{on: (name, handler) => handlers[name] = handler}});
+                const ctx = {{isIdle: () => true}};
+                if (
+                  handlers.ui_prompt_start(null, ctx) !== undefined ||
+                  handlers.ui_prompt_end(null, ctx) !== undefined
+                ) process.exit(2);
+
+                handlers.agent_start();
+                handlers.tool_execution_end({{isError: true}});
+                handlers.agent_start();
+                handlers.agent_settled({{aborted: false}});
+                handlers.agent_start();
+                handlers.agent_settled({{aborted: false}});
+                handlers.agent_start();
+                handlers.agent_settled({{aborted: true}});
+                await handlers.session_shutdown({{reason: 'reload'}});
+                await handlers.session_shutdown({{reason: 'new'}});
+                await handlers.session_shutdown({{reason: 'resume'}});
+                await handlers.session_shutdown({{reason: 'fork'}});
+                await handlers.session_shutdown({{reason: 'quit'}});
+            """)
+            env = {**os.environ, "LOG": log}
+            result = subprocess.run(
+                [node, "--experimental-strip-types", "--input-type=module", "-e", script],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(log) as f:
+                lines = [json.loads(line) for line in f.read().splitlines()]
+            self.assertEqual(
+                [(line["hook_event_name"], line.get("is_error")) for line in lines],
+                [
+                    ("agent_start", None),
+                    ("tool_execution_end", True),
+                    ("agent_start", None),
+                    ("agent_settled", True),
+                    ("agent_start", None),
+                    ("agent_settled", False),
+                    ("agent_start", None),
+                    ("agent_settled", True),
+                    ("session_shutdown", None),
+                ],
+            )
+            os.unlink(berger)
+            missing = subprocess.run(
+                [
+                    node,
+                    "--experimental-strip-types",
+                    "--input-type=module",
+                    "-e",
+                    textwrap.dedent(f"""\
+                        import ext from {json.dumps(ext)};
+
+                        const handlers = {{}};
+                        ext({{on: (name, handler) => handlers[name] = handler}});
+                        handlers.agent_start();
+                        await new Promise(resolve => setTimeout(resolve, 1100));
+                    """),
+                ],
+                env={**os.environ, "LOG": log},
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(missing.returncode, 0, missing.stderr)
+
+    def test_replacement_shutdown_drains_old_runtime_queue(self):
+        node = node_with_strip_types()
+        if node is None:
+            self.skipTest("Node >= 22.6 required for --experimental-strip-types")
+
+        with TmuxSandbox() as sb:
+            berger = _copy_berger_outside_target(sb._tmpdir)
+            init_env = dict(os.environ)
+            init_env["HOME"] = sb.home
+            init_env["XDG_CACHE_HOME"] = sb.xdg_cache
+            init_env.pop("XDG_CONFIG_HOME", None)
+            r = subprocess.run(
+                [berger, "init", "--harness", "pi"],
+                env=init_env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ext = os.path.join(sb.home, ".pi/agent/extensions/berger.ts")
+            old_ext = os.path.join(sb._tmpdir, "berger-old.ts")
+            replacement_ext = os.path.join(sb._tmpdir, "berger-replacement.ts")
+            shutil.copyfile(ext, old_ext)
+            shutil.copyfile(ext, replacement_ext)
+            log = os.path.join(sb._tmpdir, "events.log")
+            blocked = os.path.join(sb._tmpdir, "tool-blocked")
+            release = os.path.join(sb._tmpdir, "release-tool")
+            delivered = os.path.join(sb._tmpdir, "replacement-delivered")
+            os.unlink(berger)
+            with open(berger, "w") as f:
+                f.write(textwrap.dedent("""\
+                    #!/bin/sh
+                    payload=$(cat)
+                    case "$payload" in
+                      *'"hook_event_name":"tool_execution_end"'*)
+                        printf blocked > "$BLOCKED"
+                        while [ ! -f "$RELEASE" ]; do :; done
+                        ;;
+                    esac
+                    printf '%s\\n' "$payload" >> "$LOG"
+                    case "$payload" in
+                      *'"hook_event_name":"agent_start"'*)
+                        [ ! -e "$BLOCKED" ] || printf delivered > "$DELIVERED"
+                        ;;
+                    esac
+                """))
+            os.chmod(berger, 0o755)
+            script = textwrap.dedent(f"""\
+                import {{ existsSync, watch }} from "node:fs";
+                import {{ basename, dirname }} from "node:path";
+                import {{ writeFile }} from "node:fs/promises";
+                import oldExt from {json.dumps(old_ext)};
+                import replacementExt from {json.dumps(replacement_ext)};
+
+                const waitFor = async (path) => {{
+                  if (existsSync(path)) return;
+                  await new Promise((resolve) => {{
+                    const watcher = watch(dirname(path), (_event, changed) => {{
+                      if (changed === basename(path)) {{ watcher.close(); resolve(); }}
+                    }});
+                    if (existsSync(path)) {{ watcher.close(); resolve(); }}
+                  }});
+                }};
+
+                const oldHandlers = {{}};
+                oldExt({{on: (name, handler) => oldHandlers[name] = handler}});
+                oldHandlers.agent_start();
+                oldHandlers.tool_execution_end({{isError: true}});
+                let oldShutdownFinished = false;
+                const oldShutdown = oldHandlers.session_shutdown({{reason: "reload"}});
+                void oldShutdown.then(() => {{ oldShutdownFinished = true; }});
+                let toolBlocked = false;
+
+                try {{
+                  await waitFor({json.dumps(blocked)});
+                  toolBlocked = true;
+                  const replacementHandlers = {{}};
+                  replacementExt({{on: (name, handler) => replacementHandlers[name] = handler}});
+                  replacementHandlers.agent_start();
+                  const replacementShutdown = replacementHandlers.session_shutdown({{reason: "reload"}});
+                  await waitFor({json.dumps(delivered)});
+                  await Promise.resolve();
+                  if (oldShutdownFinished) {{
+                    throw new Error("old shutdown finished before replacement delivery");
+                  }}
+                  await replacementShutdown;
+                }} finally {{
+                  if (toolBlocked) {{
+                    await writeFile({json.dumps(release)}, "release\\n");
+                    await oldShutdown;
+                  }}
+                }}
+            """)
+            result = subprocess.run(
+                [node, "--experimental-strip-types", "--input-type=module", "-e", script],
+                env={
+                    **os.environ,
+                    "LOG": log,
+                    "BLOCKED": blocked,
+                    "RELEASE": release,
+                    "DELIVERED": delivered,
+                },
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(log) as f:
+                lines = [json.loads(line) for line in f.read().splitlines()]
+            self.assertEqual(
+                [line["hook_event_name"] for line in lines],
+                ["agent_start", "agent_start", "tool_execution_end"],
+            )
+
+
+class SmokePiInitSelection(unittest.TestCase):
+    def _run_installed(self, sb, *args):
+        berger_bin = _copy_berger_outside_target(sb._tmpdir)
+        env = dict(os.environ, HOME=sb.home, XDG_CACHE_HOME=sb.xdg_cache)
+        env.pop("XDG_CONFIG_HOME", None)
+        return subprocess.run(
+            [berger_bin, "init", *args], capture_output=True, text=True, env=env, timeout=10
+        )
+
+    def test_invalid_harness_rejected(self):
+        with TmuxSandbox() as sb:
+            r = self._run_installed(sb, "--harness", "wat")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("claude or pi", r.stderr)
+
+    def test_default_and_explicit_claude_install_claude_hooks(self):
+        for args in ((), ("--harness", "claude")):
+            with self.subTest(args=args), TmuxSandbox() as sb:
+                r = self._run_installed(sb, *args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(os.path.exists(os.path.join(sb.home, ".claude", "settings.json")))
+                self.assertFalse(os.path.exists(os.path.join(sb.home, ".pi", "agent", "extensions", "berger.ts")))
+
+    def test_pi_init_is_idempotent_and_preserves_unrelated_files(self):
+        with TmuxSandbox() as sb:
+            extensions = os.path.join(sb.home, ".pi", "agent", "extensions")
+            os.makedirs(extensions, exist_ok=True)
+            unrelated = os.path.join(extensions, "mine.ts")
+            with open(unrelated, "w") as f:
+                f.write("export default () => {};\n")
+            self.assertEqual(self._run_installed(sb, "--harness", "pi").returncode, 0)
+            berger_extension = os.path.join(extensions, "berger.ts")
+            with open(berger_extension) as f:
+                once = f.read()
+            self.assertEqual(self._run_installed(sb, "--harness", "pi").returncode, 0)
+            with open(berger_extension) as f:
+                self.assertEqual(f.read(), once)
+            with open(unrelated) as f:
+                self.assertEqual(f.read(), "export default () => {};\n")
+            self.assertIn("ExtensionAPI", once)
+            self.assertIn("session_shutdown", once)
+
+    def test_pi_init_refuses_to_overwrite_unmanaged_berger_extension(self):
+        with TmuxSandbox() as sb:
+            path = os.path.join(sb.home, ".pi", "agent", "extensions", "berger.ts")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("// user-owned\n")
+            r = self._run_installed(sb, "--harness", "pi")
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("refusing to overwrite", r.stderr)
+            with open(path) as f:
+                self.assertEqual(f.read(), "// user-owned\n")
+
+    def test_claude_and_pi_initialization_coexist(self):
+        with TmuxSandbox() as sb:
+            self.assertEqual(self._run_installed(sb).returncode, 0)
+            settings = os.path.join(sb.home, ".claude", "settings.json")
+            with open(settings) as f:
+                claude_before = json.load(f)
+            self.assertEqual(self._run_installed(sb, "--harness", "pi").returncode, 0)
+            with open(settings) as f:
+                self.assertEqual(json.load(f), claude_before)
+            self.assertTrue(os.path.exists(os.path.join(sb.home, ".pi", "agent", "extensions", "berger.ts")))
+
+
+class SmokePiEvents(unittest.TestCase):
+    def test_pi_lifecycle_and_cleanup(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            for event, (state, symbol) in PI_EVENT_TABLE.items():
+                extra = {"harness": "pi"}
+                if event == "tool_execution_end":
+                    extra["is_error"] = True
+                current = sb.windows("prj")[0]
+                sb.event(hook_payload(event, **extra), session="prj", window=current)
+                if state is None:
+                    self.assertTrue(sb.wait_for_no_state("prj", "impl"))
+                    self.assertTrue(sb.wait_for_window("prj", "impl"))
+                else:
+                    self.assertTrue(sb.wait_for_state("prj", "impl"))
+                    self.assertEqual(sb.state("prj", "impl")["state"], state)
+                    self.assertTrue(sb.wait_for_window("prj", f"impl{symbol}"))
+
+    def test_non_error_tool_completion_is_a_noop(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.event(hook_payload("agent_settled", harness="pi"), session="prj", window="impl")
+            self.assertTrue(sb.wait_for_window("prj", "impl✓"))
+            sb.event(hook_payload("tool_execution_end", harness="pi", is_error=False), session="prj", window="impl✓")
+            self.assertEqual(sb.windows("prj"), ["impl✓"])
+            self.assertEqual(sb.state("prj", "impl")["state"], "done")
+
+    def test_unknown_pi_event_and_harness_are_noops(self):
+        with TmuxSandbox() as sb:
+            sb.new_session("prj", "impl")
+            sb.event(hook_payload("agent_settled", harness="pi"), session="prj", window="impl")
+            self.assertTrue(sb.wait_for_window("prj", "impl✓"))
+            sb.event(hook_payload("future_event", harness="pi"), session="prj", window="impl✓")
+            sb.event(hook_payload("Stop", harness="bogus"), session="prj", window="impl✓")
+            self.assertEqual(sb.windows("prj"), ["impl✓"])
+            self.assertEqual(sb.state("prj", "impl")["state"], "done")
 
 
 if __name__ == "__main__":

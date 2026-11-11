@@ -159,7 +159,7 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         assignments = " ".join(f"{k}={_sh_quote(v)}" for k, v in env.items())
         # A dev's own shell may export XDG_CONFIG_HOME; that must not leak into
         # berger's config-dir resolution inside the sandbox.
-        return f"XDG_CONFIG_HOME= {assignments}"
+        return f"TMUX= TMUX_PANE= XDG_CONFIG_HOME= {assignments}"
 
     def event(self, payload_json, *, session, window, agent=None, timeout=5.0):
         """Run `berger event` inside a run-shell targeted at session:window, so
@@ -191,7 +191,6 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         out_path = os.path.join(self._tmpdir, f"out-{next(_socket_counter)}.txt")
         tmp_path = out_path + ".part"
         extra = {"BERGER_AGENT": agent} if agent is not None else {}
-        prefix = self._env_prefix(extra)
         # Payload goes into its own file rather than interpolated inline --
         # embedding it inside a double-quoted shell string only escapes `\`
         # and `"`; `$(...)`, backticks, and `$VAR` in the payload would still
@@ -199,6 +198,12 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         payload_path = os.path.join(self._tmpdir, f"payload-{next(_socket_counter)}.json")
         with open(payload_path, "w") as f:
             f.write(payload_json)
+        target = f"{session}:{window}" if not self._dead and window in (self.windows(session) or []) else None
+        if target:
+            pane = _real_tmux("-L", self.socket, "list-panes", "-t", target, "-F", "#{pane_id}")
+            if pane.returncode == 0 and pane.stdout.strip():
+                extra["TMUX_PANE"] = pane.stdout.splitlines()[0]
+        prefix = self._env_prefix(extra)
         inner = (
             f"cat {_sh_quote(payload_path)} | "
             f"{prefix} {_sh_quote(BERGER_BIN)} event >{_sh_quote(tmp_path)} 2>&1; "
@@ -213,7 +218,6 @@ class TmuxSandbox(contextlib.AbstractContextManager):
         # actually still present, so a stale name degrades to "no target"
         # (output display falls back to the session's active window; harmless
         # since output is redirected to a file) instead of a hard failure.
-        target = f"{session}:{window}" if not self._dead and window in (self.windows(session) or []) else None
         args = ["-L", self.socket]
         if target:
             args += ["select-window", "-t", target, ";"]

@@ -39,18 +39,6 @@ impl fmt::Display for State {
     }
 }
 
-/// Maps a hook event name to the state it represents, or `None` if the event should
-/// clear state entirely (`SessionEnd`) or is unrecognized.
-pub fn state_for_event(hook_event_name: &str) -> Option<State> {
-    match hook_event_name {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(State::Working),
-        "PermissionRequest" => Some(State::Approval),
-        "PostToolUseFailure" | "StopFailure" => Some(State::Error),
-        "Stop" => Some(State::Done),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateRecord {
     pub agent: String,
@@ -312,27 +300,6 @@ mod io_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn events_map_to_expected_states() {
-        assert_eq!(state_for_event("SessionStart"), Some(State::Working));
-        assert_eq!(state_for_event("UserPromptSubmit"), Some(State::Working));
-        assert_eq!(state_for_event("PreToolUse"), Some(State::Working));
-        assert_eq!(state_for_event("PermissionRequest"), Some(State::Approval));
-        assert_eq!(state_for_event("PostToolUseFailure"), Some(State::Error));
-        assert_eq!(state_for_event("StopFailure"), Some(State::Error));
-        assert_eq!(state_for_event("Stop"), Some(State::Done));
-    }
-
-    #[test]
-    fn session_end_clears_state() {
-        assert_eq!(state_for_event("SessionEnd"), None);
-    }
-
-    #[test]
-    fn unknown_event_is_none() {
-        assert_eq!(state_for_event("SomethingNew"), None);
-    }
 
     #[test]
     fn working_has_no_symbol() {

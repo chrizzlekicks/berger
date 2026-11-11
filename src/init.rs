@@ -3,6 +3,7 @@ use crate::state;
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 const HOOK_EVENTS: &[&str] = &[
@@ -304,6 +305,46 @@ fn xdg_subdir(xdg_var: &str, home_fallback_dir: &str, name: &str) -> PathBuf {
     }
 }
 
+const PI_EXTENSION_MARKER: &str = "// Managed by berger init;";
+const PI_EXTENSION_BINARY_PLACEHOLDER: &str = "__BERGER_BIN__";
+const PI_EXTENSION_TEMPLATE: &str = include_str!("../tests/fixtures/pi-extension.ts");
+
+fn pi_extension_contents(berger_bin: &str) -> String {
+    let binary = serde_json::to_string(berger_bin)
+        .unwrap()
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    PI_EXTENSION_TEMPLATE.replace(PI_EXTENSION_BINARY_PLACEHOLDER, &binary)
+}
+
+fn write_managed_pi_extension_at(path: &Path, berger_bin: &str) -> io::Result<()> {
+    match fs::read_to_string(path) {
+        Ok(existing) if !existing.starts_with(PI_EXTENSION_MARKER) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "refusing to overwrite an extension not managed by berger",
+            ));
+        }
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    write_atomic(path, &pi_extension_contents(berger_bin))
+}
+
+fn write_pi_extension(berger_bin: &str) -> PathBuf {
+    let dir = home().join(".pi/agent/extensions");
+    exit_on_error(
+        fs::create_dir_all(&dir),
+        "could not create Pi extensions directory",
+    );
+    let path = dir.join("berger.ts");
+    exit_on_error(
+        write_managed_pi_extension_at(&path, berger_bin),
+        &format!("could not write {}", path.display()),
+    );
+    path
+}
+
 fn write_berger_tmux_conf(berger_bin: &str) -> PathBuf {
     let berger_conf_dir = berger_config_dir();
     exit_on_error(
@@ -358,10 +399,16 @@ fn report_tmux_conf_sourcing(tmux_conf_path: &Path) {
 /// Runs the `init` command: refuses to run from a build directory, merges hooks into
 /// `~/.claude/settings.json`, writes `~/.config/berger/tmux.conf`, creates the cache
 /// root.
-pub fn run() {
+pub fn run(harness: &str) {
     let berger_bin = resolve_berger_bin();
 
-    let settings_path = update_claude_settings(&berger_bin);
+    if harness == "pi" {
+        let path = write_pi_extension(&berger_bin);
+        println!("berger init: wrote {}", path.display());
+    } else {
+        let path = update_claude_settings(&berger_bin);
+        println!("berger init: wrote {}", path.display());
+    }
     let tmux_conf_path = write_berger_tmux_conf(&berger_bin);
 
     exit_on_error(
@@ -369,7 +416,6 @@ pub fn run() {
         "could not create cache root",
     );
 
-    println!("berger init: wrote {}", settings_path.display());
     println!("berger init: wrote {}", tmux_conf_path.display());
     report_tmux_conf_sourcing(&tmux_conf_path);
 }
@@ -546,6 +592,51 @@ mod tests {
             let entries = settings["hooks"][event].as_array().unwrap();
             assert_eq!(entries.len(), 1);
         }
+    }
+
+    #[test]
+    fn pi_extension_template_has_one_binary_placeholder() {
+        assert_eq!(
+            PI_EXTENSION_TEMPLATE
+                .matches(PI_EXTENSION_BINARY_PLACEHOLDER)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn pi_extension_uses_a_safe_javascript_string_literal() {
+        let contents = pi_extension_contents("/tmp/line\nseparator\u{2028}'berger");
+        assert!(contents.contains(r#"const berger = "/tmp/line\nseparator\u2028'berger";"#));
+    }
+
+    #[test]
+    fn pi_extension_refuses_to_replace_an_unmanaged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("berger.ts");
+        fs::write(&path, "// my extension\n").unwrap();
+        let error = write_managed_pi_extension_at(&path, "/bin/berger").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(path).unwrap(), "// my extension\n");
+    }
+
+    #[test]
+    fn pi_extension_replaces_its_managed_file_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("berger.ts");
+        write_managed_pi_extension_at(&path, "/bin/berger").unwrap();
+        let once = fs::read_to_string(&path).unwrap();
+        write_managed_pi_extension_at(&path, "/bin/berger").unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), once);
+    }
+
+    #[test]
+    fn pi_extension_preserves_a_non_utf8_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("berger.ts");
+        fs::write(&path, [0xff]).unwrap();
+        assert!(write_managed_pi_extension_at(&path, "/bin/berger").is_err());
+        assert_eq!(fs::read(path).unwrap(), [0xff]);
     }
 
     #[test]

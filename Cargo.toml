@@ -2,7 +2,7 @@
 name = "berger"
 version = "0.2.0"
 edition = "2024"
-description = "Make tmux sessions agent-aware from Claude Code lifecycle hooks"
+description = "Make tmux sessions agent-aware from Claude Code and Pi lifecycle events"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/chrizzlekicks/berger"
 readme = "README.md"
