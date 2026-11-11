@@ -317,7 +317,7 @@ fn pi_extension_contents(berger_bin: &str) -> String {
     PI_EXTENSION_TEMPLATE.replace(PI_EXTENSION_BINARY_PLACEHOLDER, &binary)
 }
 
-fn write_pi_extension_at(path: &Path, berger_bin: &str) -> io::Result<()> {
+fn write_managed_pi_extension_at(path: &Path, berger_bin: &str) -> io::Result<()> {
     match fs::read_to_string(path) {
         Ok(existing) if !existing.starts_with(PI_EXTENSION_MARKER) => {
             return Err(io::Error::new(
@@ -339,7 +339,7 @@ fn write_pi_extension(berger_bin: &str) -> PathBuf {
     );
     let path = dir.join("berger.ts");
     exit_on_error(
-        write_pi_extension_at(&path, berger_bin),
+        write_managed_pi_extension_at(&path, berger_bin),
         &format!("could not write {}", path.display()),
     );
     path
@@ -615,7 +615,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("berger.ts");
         fs::write(&path, "// my extension\n").unwrap();
-        let error = write_pi_extension_at(&path, "/bin/berger").unwrap_err();
+        let error = write_managed_pi_extension_at(&path, "/bin/berger").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(path).unwrap(), "// my extension\n");
     }
@@ -624,9 +624,9 @@ mod tests {
     fn pi_extension_replaces_its_managed_file_idempotently() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("berger.ts");
-        write_pi_extension_at(&path, "/bin/berger").unwrap();
+        write_managed_pi_extension_at(&path, "/bin/berger").unwrap();
         let once = fs::read_to_string(&path).unwrap();
-        write_pi_extension_at(&path, "/bin/berger").unwrap();
+        write_managed_pi_extension_at(&path, "/bin/berger").unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), once);
     }
 
@@ -635,7 +635,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("berger.ts");
         fs::write(&path, [0xff]).unwrap();
-        assert!(write_pi_extension_at(&path, "/bin/berger").is_err());
+        assert!(write_managed_pi_extension_at(&path, "/bin/berger").is_err());
         assert_eq!(fs::read(path).unwrap(), [0xff]);
     }
 

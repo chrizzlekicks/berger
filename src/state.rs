@@ -39,30 +39,6 @@ impl fmt::Display for State {
     }
 }
 
-/// Maps a harness event to its state. Callers distinguish explicit lifecycle
-/// cleanup events from ignored events before invoking this function.
-pub fn state_for_event(harness: &str, event: &str, is_error: Option<bool>) -> Option<State> {
-    match harness {
-        "pi" => match event {
-            "agent_start" | "ui_prompt_end" => Some(State::Working),
-            "ui_prompt_start" => Some(State::Approval),
-            "tool_execution_end" if is_error == Some(true) => Some(State::Error),
-            "agent_settled" if is_error == Some(true) => Some(State::Error),
-            "agent_settled" => Some(State::Done),
-            "session_shutdown" => None,
-            _ => None,
-        },
-        _ => match event {
-            "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(State::Working),
-            "PermissionRequest" => Some(State::Approval),
-            "PostToolUseFailure" | "StopFailure" => Some(State::Error),
-            "Stop" => Some(State::Done),
-            "SessionEnd" => None,
-            _ => None,
-        },
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateRecord {
     pub agent: String,
@@ -324,36 +300,6 @@ mod io_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn events_map_to_expected_states() {
-        for (harness, event, is_error, expected) in [
-            ("claude", "SessionStart", None, Some(State::Working)),
-            ("claude", "UserPromptSubmit", None, Some(State::Working)),
-            ("claude", "PreToolUse", None, Some(State::Working)),
-            ("claude", "PermissionRequest", None, Some(State::Approval)),
-            ("claude", "PostToolUseFailure", None, Some(State::Error)),
-            ("claude", "StopFailure", None, Some(State::Error)),
-            ("claude", "Stop", None, Some(State::Done)),
-            ("claude", "SessionEnd", None, None),
-            ("claude", "SomethingNew", None, None),
-            ("pi", "agent_start", None, Some(State::Working)),
-            ("pi", "ui_prompt_start", None, Some(State::Approval)),
-            ("pi", "ui_prompt_end", None, Some(State::Working)),
-            ("pi", "tool_execution_end", Some(true), Some(State::Error)),
-            ("pi", "tool_execution_end", Some(false), None),
-            ("pi", "agent_settled", Some(true), Some(State::Error)),
-            ("pi", "agent_settled", Some(false), Some(State::Done)),
-            ("pi", "session_shutdown", None, None),
-            ("pi", "future_event", None, None),
-        ] {
-            assert_eq!(
-                state_for_event(harness, event, is_error),
-                expected,
-                "{harness}:{event}"
-            );
-        }
-    }
 
     #[test]
     fn working_has_no_symbol() {

@@ -1,6 +1,6 @@
 """Hook-JSON payload builders and the verified event -> (state, symbol) table.
 
-Mirrors src/state.rs::state_for_event and State::symbol exactly. Keep these two
+Mirrors src/event.rs::state_for_event and State::symbol exactly. Keep these two
 in sync with the Rust source if the contract changes -- that's the whole point
 of a smoke test.
 """

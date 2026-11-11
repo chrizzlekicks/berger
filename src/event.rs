@@ -3,12 +3,36 @@ use crate::fs_util::encode_session_component;
 use crate::hook::HookPayload;
 use crate::name::strip_suffix;
 use crate::reconcile::window_matches_record;
-use crate::state::{self, StateRecord};
+use crate::state::{self, State, StateRecord};
 use crate::tmux::{self, Window};
 use std::env;
 use std::io::{Read, stdin};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Maps a harness event to its state. Callers distinguish explicit lifecycle
+/// cleanup events from ignored events before invoking this function.
+fn state_for_event(harness: &str, event: &str, is_error: Option<bool>) -> Option<State> {
+    match harness {
+        "pi" => match event {
+            "agent_start" | "ui_prompt_end" => Some(State::Working),
+            "ui_prompt_start" => Some(State::Approval),
+            "tool_execution_end" if is_error == Some(true) => Some(State::Error),
+            "agent_settled" if is_error == Some(true) => Some(State::Error),
+            "agent_settled" => Some(State::Done),
+            "session_shutdown" => None,
+            _ => None,
+        },
+        _ => match event {
+            "SessionStart" | "UserPromptSubmit" | "PreToolUse" => Some(State::Working),
+            "PermissionRequest" => Some(State::Approval),
+            "PostToolUseFailure" | "StopFailure" => Some(State::Error),
+            "Stop" => Some(State::Done),
+            "SessionEnd" => None,
+            _ => None,
+        },
+    }
+}
 
 /// Resolves the agent name: `$BERGER_AGENT` override (mirrors amux's `AMUX_AGENT`),
 /// else the current tmux window name (suffix stripped), else `basename($PWD)`.
@@ -72,7 +96,7 @@ pub fn run() {
     if harness != "claude" && harness != "pi" {
         return;
     }
-    let mapped = state::state_for_event(harness, &payload.hook_event_name, payload.is_error);
+    let mapped = state_for_event(harness, &payload.hook_event_name, payload.is_error);
     if harness == "pi" && mapped.is_none() && payload.hook_event_name != "session_shutdown" {
         return;
     }
@@ -258,7 +282,36 @@ fn now_utc() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::State;
+
+    #[test]
+    fn events_map_to_expected_states() {
+        for (harness, event, is_error, expected) in [
+            ("claude", "SessionStart", None, Some(State::Working)),
+            ("claude", "UserPromptSubmit", None, Some(State::Working)),
+            ("claude", "PreToolUse", None, Some(State::Working)),
+            ("claude", "PermissionRequest", None, Some(State::Approval)),
+            ("claude", "PostToolUseFailure", None, Some(State::Error)),
+            ("claude", "StopFailure", None, Some(State::Error)),
+            ("claude", "Stop", None, Some(State::Done)),
+            ("claude", "SessionEnd", None, None),
+            ("claude", "SomethingNew", None, None),
+            ("pi", "agent_start", None, Some(State::Working)),
+            ("pi", "ui_prompt_start", None, Some(State::Approval)),
+            ("pi", "ui_prompt_end", None, Some(State::Working)),
+            ("pi", "tool_execution_end", Some(true), Some(State::Error)),
+            ("pi", "tool_execution_end", Some(false), None),
+            ("pi", "agent_settled", Some(true), Some(State::Error)),
+            ("pi", "agent_settled", Some(false), Some(State::Done)),
+            ("pi", "session_shutdown", None, None),
+            ("pi", "future_event", None, None),
+        ] {
+            assert_eq!(
+                state_for_event(harness, event, is_error),
+                expected,
+                "{harness}:{event}"
+            );
+        }
+    }
 
     fn record(agent: &str, window_id: &str) -> StateRecord {
         StateRecord {
