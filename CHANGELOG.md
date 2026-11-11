@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/chrizzlekicks/berger/compare/berger-v0.2.0...berger-v0.3.0) (2026-11-11)
+
+
+### Features
+
+* add Pi harness support ([#16](https://github.com/chrizzlekicks/berger/issues/16)) ([5d813c4](https://github.com/chrizzlekicks/berger/commit/5d813c47251c17ac8947dbd3a570a67021ad2ef1))
+
 ## [0.2.0](https://github.com/chrizzlekicks/berger/compare/berger-v0.1.0...berger-v0.2.0) (2026-09-09)
 
 
