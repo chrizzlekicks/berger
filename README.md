@@ -146,6 +146,16 @@ claude
 | Pi extension | `~/.pi/agent/extensions/berger.ts` |
 | State files | `$XDG_CACHE_HOME/berger/<session>/<agent>.state` (default `~/.cache/berger/...`) |
 
+Session and agent names are escaped as individual state-path components: `/`,
+`\`, and `%` become `%2f`, `%5c`, and `%25`, respectively. Session keys
+preserve case, so `Foo` and `foo` produce distinct keys. Whether those keys can
+coexist as directories depends on the filesystem's case sensitivity.
+
+Agent keys are lowercased: `Impl` and `impl` both map to `impl.state`. This
+normalization avoids agent names colliding only on case-insensitive filesystems,
+so the same names share a key across platforms. Window-to-agent matching also
+ignores ASCII case.
+
 ## Architecture
 
 ```mermaid

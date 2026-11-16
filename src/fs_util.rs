@@ -42,18 +42,17 @@ fn escape_path_component(component: &str) -> String {
     encoded
 }
 
-/// Escapes and lowercases `component`. Used for the agent name: berger treats
-/// agent names as case-insensitive everywhere, not just on case-folding
-/// filesystems, so `Impl` and `impl` always share one state file rather than
-/// colliding only on some hosts (e.g. default macOS volumes) and not others.
+/// Escapes and lowercases an agent name for its state-file key. For example,
+/// `Impl` and `impl` share a key, avoiding platform-dependent ASCII case
+/// collisions. Unlike session keys, agent keys are normalized; window matching
+/// separately ignores ASCII case (see `reconcile::agent_matches`).
 pub fn encode_path_component(component: &str) -> String {
     escape_path_component(component).to_lowercase()
 }
 
-/// Escapes `component` without folding case. Used for the tmux session name:
-/// unlike agent names, two live tmux sessions differing only by case (`Foo` and
-/// `foo`) are genuinely distinct sessions, so their state must not share a
-/// directory.
+/// Escapes a tmux session name without folding case. Unlike normalized agent
+/// keys, `Foo` and `foo` remain distinct keys because tmux treats them as
+/// distinct sessions. A case-insensitive filesystem may still conflate them.
 pub fn encode_session_component(component: &str) -> String {
     escape_path_component(component)
 }
@@ -118,8 +117,26 @@ mod tests {
     }
 
     #[test]
+    fn encode_session_component_preserves_case() {
+        assert_eq!(encode_session_component("Foo"), "Foo");
+        assert_eq!(encode_session_component("foo"), "foo");
+        assert_ne!(
+            encode_session_component("Foo"),
+            encode_session_component("foo")
+        );
+    }
+
+    #[test]
     fn encode_path_component_lowercases_by_design() {
         assert_eq!(encode_path_component("Impl"), encode_path_component("impl"));
         assert_eq!(encode_path_component("Impl"), "impl");
+    }
+
+    #[test]
+    fn encoding_helpers_escape_separators_and_percent_consistently() {
+        for (input, expected) in [("a/b", "a%2fb"), ("a\\b", "a%5cb"), ("a%b", "a%25b")] {
+            assert_eq!(encode_session_component(input), expected);
+            assert_eq!(encode_path_component(input), expected);
+        }
     }
 }

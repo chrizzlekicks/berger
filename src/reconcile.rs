@@ -2,11 +2,11 @@ use crate::name::strip_suffix;
 use crate::state::StateRecord;
 use crate::tmux::Window;
 
-/// Agent names fold ASCII case on the on-disk path (see
-/// `fs_util::encode_path_component`), so window-to-record matching must fold
-/// ASCII case too, to agree with how state files are keyed. Session names are
-/// no longer folded this way (see `fs_util::encode_session_component`) — two
-/// live tmux sessions differing only by case are genuinely distinct.
+/// Matches a window name (without its suffix) to an agent, ignoring ASCII case.
+/// Agent state keys are lowercased (see `fs_util::encode_path_component`), so
+/// ASCII variants such as `Impl` and `impl` match the same key. In contrast,
+/// session keys preserve case (see `fs_util::encode_session_component`).
+/// Key encoding uses Unicode lowercasing; this comparison ignores ASCII case only.
 pub fn agent_matches(window_name: &str, agent: &str) -> bool {
     strip_suffix(window_name).eq_ignore_ascii_case(agent)
 }
